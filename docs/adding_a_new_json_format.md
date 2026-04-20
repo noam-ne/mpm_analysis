@@ -46,7 +46,7 @@ Subclass `ExperimentalLoader` and implement three methods:
 # my_loader.py
 from pathlib import Path
 import numpy as np
-from zeno_analysis.io.experimental.base import ExperimentalLoader
+from mpm_analysis.io.experimental.base import ExperimentalLoader
 
 class MyFormatLoader(ExperimentalLoader):
 
@@ -73,8 +73,8 @@ and metadata extraction.
 ```python
 from pathlib import Path
 from my_loader import MyFormatLoader
-from zeno_analysis.pipeline.mpm_pipeline import MPMPipeline
-from zeno_analysis.analysis.steps import MPMStep, BootstrapStep
+from mpm_analysis.pipeline.mpm_pipeline import MPMPipeline
+from mpm_analysis.analysis.steps import MPMStep, BootstrapStep
 
 folder = Path("/path/to/my/data")
 records = MyFormatLoader().load(folder, observables=["survival"])
@@ -120,7 +120,7 @@ and that file is skipped — the rest of the scan still loads.
 ### All curves at once (colour-coded by λ)
 
 ```python
-from zeno_analysis.plotting.exploratory import plot_raw_survival
+from mpm_analysis.plotting.exploratory import plot_raw_survival
 import matplotlib.pyplot as plt
 
 fig, ax = plt.subplots(figsize=(7, 4))
@@ -131,7 +131,7 @@ plt.show()
 ### Selected linecuts (paper-quality)
 
 ```python
-from zeno_analysis.plotting.survival_curves import plot_survival_curves_panel
+from mpm_analysis.plotting.survival_curves import plot_survival_curves_panel
 import numpy as np
 
 fig, ax = plt.subplots()
@@ -154,13 +154,13 @@ signal** (clean model evaluated from the fitted poles) is overlaid in red when
 you pass `boot_results`.
 
 ```python
-from zeno_analysis.plotting.exploratory import plot_time_traces_slider
+from mpm_analysis.plotting.exploratory import plot_time_traces_slider
 
 # Raw traces only
 plot_time_traces_slider(records)
 
 # With reconstructed fit overlay
-from zeno_analysis.analysis.bootstrap import run_bootstrap
+from mpm_analysis.analysis.bootstrap import run_bootstrap
 import numpy as np
 
 boot_results = run_bootstrap(
@@ -179,7 +179,7 @@ Use `log_scale=False` for linear y-axis.
 ### Quick spectrum (decay rates or frequencies)
 
 ```python
-from zeno_analysis.plotting.exploratory import plot_eigenvalue_spectrum
+from mpm_analysis.plotting.exploratory import plot_eigenvalue_spectrum
 import matplotlib.pyplot as plt
 
 fig, axes = plt.subplots(1, 2, figsize=(12, 4))
@@ -231,8 +231,8 @@ plt.show()
 ### Bootstrap distribution at a specific λ
 
 ```python
-from zeno_analysis.plotting.exploratory import plot_bootstrap_distribution
-from zeno_analysis.analysis.bootstrap import run_bootstrap
+from mpm_analysis.plotting.exploratory import plot_bootstrap_distribution
+from mpm_analysis.analysis.bootstrap import run_bootstrap
 import numpy as np
 
 boot_results = run_bootstrap(records, order=3, n_boot=500, observable_key="survival")
@@ -242,7 +242,7 @@ plot_bootstrap_distribution(boot_results, lambda_idx=10, pole_idx=0, component="
 ### Paper-quality 3-panel figure (decay + splitting + fit)
 
 ```python
-from zeno_analysis.plotting.paper_figures.appendix_bootstrap import plot_appendix_bootstrap
+from mpm_analysis.plotting.paper_figures.appendix_bootstrap import plot_appendix_bootstrap
 
 fig = plot_appendix_bootstrap(
     result,
@@ -328,7 +328,7 @@ print(f"slope = {popt[0]:.4f},  intercept = {popt[1]:.4f}")
 Set `order` in `MPMStep` (and optionally in `BootstrapStep`):
 
 ```python
-from zeno_analysis.analysis.steps import MPMStep, BootstrapStep
+from mpm_analysis.analysis.steps import MPMStep, BootstrapStep
 
 steps = [
     MPMStep(order=4),                      # extract 4 poles per λ
@@ -371,7 +371,7 @@ poles[2+] — remaining slow poles
 
 **To use a different pair** (e.g. poles 1 and 2):
 
-1. Open `src/zeno_analysis/analysis/bootstrap.py`, function `_compute_splitting`.
+1. Open `src/mpm_analysis/analysis/bootstrap.py`, function `_compute_splitting`.
 2. Change the index `[:, 1]` / `[:, 0]` at lines ~236 and ~242 to the pair
    you want.
 3. Re-run the bootstrap — the `PolesResult` splitting fields will reflect the
@@ -383,7 +383,7 @@ intended extension point.
 ### Restricting the lambda window fed to the critical-point fitter
 
 ```python
-from zeno_analysis.pipeline.critical_point_pipeline import CriticalPointPipeline
+from mpm_analysis.pipeline.critical_point_pipeline import CriticalPointPipeline
 
 # Only use λ ≤ 1.55 for the fit
 cp = CriticalPointPipeline(result, lambda_max=1.55)

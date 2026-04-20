@@ -11,11 +11,11 @@ What you see:
 """
 import matplotlib.pyplot as plt
 
-from zeno_analysis.simulation.postselected_dynamics import PostSelectedDynamicsSimulator
-from zeno_analysis.simulation.ensemble_average import EnsembleAverageDynamics
-from zeno_analysis.pipeline.mpm_pipeline import MPMPipeline
-from zeno_analysis.analysis.steps import MPMStep, BootstrapStep
-from zeno_analysis.plotting.exploratory import (
+from mpm_analysis.simulation.postselected_dynamics import PostSelectedDynamicsSimulator
+from mpm_analysis.simulation.ensemble_average import EnsembleAverageDynamics
+from mpm_analysis.pipeline.mpm_pipeline import MPMPipeline
+from mpm_analysis.analysis.steps import MPMStep, BootstrapStep
+from mpm_analysis.plotting.exploratory import (
     plot_raw_survival,
 
     plot_eigenvalue_spectrum,

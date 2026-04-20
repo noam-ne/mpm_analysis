@@ -7,7 +7,7 @@ Run this script to verify the loader works on your data.
 """
 from pathlib import Path
 
-from zeno_analysis.io.experimental import EnsembleAverageLoader, PostSelectedLoader
+from mpm_analysis.io.experimental import EnsembleAverageLoader, PostSelectedLoader
 
 # ---- CONFIGURE PATHS ----
 # Change these to point to your actual data folder

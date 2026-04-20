@@ -8,9 +8,9 @@ This is the thin-caller replacement for
 """
 from pathlib import Path
 
-from zeno_analysis.io.analysis_json import load_analysis_result
-from zeno_analysis.io.experimental import EnsembleAverageLoader
-from zeno_analysis.plotting.paper_figures import make_third_transition_figure
+from mpm_analysis.io.analysis_json import load_analysis_result
+from mpm_analysis.io.experimental import EnsembleAverageLoader
+from mpm_analysis.plotting.paper_figures import make_third_transition_figure
 
 # ---- PATHS — change to your actual locations ----
 PANEL_B_JSON = Path(

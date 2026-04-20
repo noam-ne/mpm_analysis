@@ -1,4 +1,4 @@
-# zeno_analysis
+# mpm_analysis
 
 Analysis package: loading experimental data, extracting poles via the Matrix
 Pencil Method (MPM), bootstrap uncertainty quantification, critical-point
@@ -25,7 +25,7 @@ python examples/ex_run_bootstrap_small.py
 
 Dropbox paths differ per machine.  `run.py` auto-detects the correct root
 using the hostname.  The mapping lives in
-`src/zeno_analysis/utils/lab_paths.py` and mirrors `ZenoPlotting/base.py`.
+`src/mpm_analysis/utils/lab_paths.py` and mirrors `ZenoPlotting/base.py`.
 
 **Currently registered machines:**
 
@@ -39,7 +39,7 @@ using the hostname.  The mapping lives in
 **Adding a new computer:**
 
 1. Find your hostname: `python -c "import socket; print(socket.gethostname())"`
-2. Add an entry to `_DROPBOX_ROOTS` in `src/zeno_analysis/utils/lab_paths.py`.
+2. Add an entry to `_DROPBOX_ROOTS` in `src/mpm_analysis/utils/lab_paths.py`.
 .
 
 If your hostname is not registered you will get a clear `ValueError` when
@@ -58,7 +58,7 @@ the code raises a `ValueError` or `KeyError` immediately.
 ## Package structure
 
 ```
-zeno_analysis/
+mpm_analysis/
 ├── run.py                   ← Main orchestrator (toggleable tasks, edit paths here)
 ├── examples/                ← Small runnable demos per module
 │   ├── ex_run_bootstrap_small.py
@@ -68,7 +68,7 @@ zeno_analysis/
 │   └── ex_paper_figure.py
 ├── docs/
 │   └── adding_a_new_json_format.md  ← How to plug in a new data source
-└── src/zeno_analysis/
+└── src/mpm_analysis/
     ├── data_types/          ← Typed containers (no I/O, no heavy deps)
     ├── io/                  ← Load/save: JSON, NPZ, experimental folders
     ├── analysis/            ← Numerical core: MPM, RRHA, bootstrap, ksi, guesses
@@ -175,7 +175,7 @@ ZenoAnalysisResult
 ### `PoleSamples` — raw bootstrap draws
 
 ```python
-from zeno_analysis.data_types import PoleSamples
+from mpm_analysis.data_types import PoleSamples
 
 ps = result.poles.raw_samples   # populated by BootstrapStep
 ps.samples                      # complex, shape (n_lambda, n_boot, order)
@@ -191,7 +191,7 @@ All producers (MPMStep, MPMRRHAStep, bootstrap inner loop) sort poles by
 **real part ascending** (ties broken by imaginary part ascending).
 
 ```python
-from zeno_analysis.analysis.pole_sorting import sort_poles_canonical
+from mpm_analysis.analysis.pole_sorting import sort_poles_canonical
 
 sorted_poles = sort_poles_canonical(poles)  # shape (order,)
 # poles[0]: most negative real (fastest decay / EP pole)
@@ -210,7 +210,7 @@ Splittings use poles 0 and 1 (the EP pair):
 ### Ensemble-average (`scan_experiment_results_50`)
 
 ```python
-from zeno_analysis.io.experimental import EnsembleAverageLoader
+from mpm_analysis.io.experimental import EnsembleAverageLoader
 
 loader = EnsembleAverageLoader()
 records = loader.load(folder, observables=["survival", "Z"])
@@ -221,7 +221,7 @@ records = loader.load(folder, observables=["survival", "Z"])
 ### Post-selected (`click_record_with_post_selected_tomography`)
 
 ```python
-from zeno_analysis.io.experimental import PostSelectedLoader
+from mpm_analysis.io.experimental import PostSelectedLoader
 
 loader = PostSelectedLoader()
 records = loader.load(folder, observables=["survival"])
@@ -249,7 +249,7 @@ The loaders automatically parse a trailing integer from the folder name (e.g.
 record's metadata.
 
 ```python
-from zeno_analysis.io.file_naming import parse_result_filename
+from mpm_analysis.io.file_naming import parse_result_filename
 info = parse_result_filename("mpm_ens_avg_scan50_N50_lam0.40-1.60_20260410_143022.json")
 # {'analysis_type': 'mpm', 'source_tag': 'ens_avg', 'scan_number': 50, ...}
 ```
@@ -261,7 +261,7 @@ info = parse_result_filename("mpm_ens_avg_scan50_N50_lam0.40-1.60_20260410_14302
 ### Typical usage (one call)
 
 ```python
-from zeno_analysis.pipeline.mpm_pipeline import MPMPipeline
+from mpm_analysis.pipeline.mpm_pipeline import MPMPipeline
 
 result = MPMPipeline.from_ensemble_average(folder, n_boot=2000).run()
 ```
@@ -269,7 +269,7 @@ result = MPMPipeline.from_ensemble_average(folder, n_boot=2000).run()
 ### With explicit steps — standard MPM
 
 ```python
-from zeno_analysis.analysis.steps import MPMStep, BootstrapStep
+from mpm_analysis.analysis.steps import MPMStep, BootstrapStep
 
 steps = [
     MPMStep(order=3),
@@ -281,7 +281,7 @@ result = MPMPipeline.from_ensemble_average(folder, steps=steps).run()
 ### With RRHA-enhanced MPM (better noise robustness)
 
 ```python
-from zeno_analysis.analysis.steps import MPMRRHAStep, BootstrapStep
+from mpm_analysis.analysis.steps import MPMRRHAStep, BootstrapStep
 
 steps = [
     MPMRRHAStep(order=3, max_iter=5),
@@ -308,7 +308,7 @@ result = MPMPipeline.from_records(records, steps=steps).run()
 ### With a preset (recommended)
 
 ```python
-from zeno_analysis.pipeline.critical_point_pipeline import CriticalPointPipeline
+from mpm_analysis.pipeline.critical_point_pipeline import CriticalPointPipeline
 
 cp = CriticalPointPipeline.from_json("result.json", lambda_max=1.55)
 fit = cp.fit(preset="ens_avg_experimental", window_left=50, window_right=15)
@@ -318,7 +318,7 @@ print(f"lambda_c = {fit.lambda_c:.4f} +/- {fit.lambda_c_err:.4f}")
 ### Available presets
 
 ```python
-from zeno_analysis.analysis.critical_point_guesses import get_guess, list_presets
+from mpm_analysis.analysis.critical_point_guesses import get_guess, list_presets
 
 list_presets()
 # ['post_selected_experimental', 'ens_avg_experimental', 'post_selected_simulation']
@@ -350,8 +350,8 @@ Re(Δe₁₂) = a·√|λ−λ_c| + b·(λ−λ_c)^1.5   (λ > λ_c, real splitt
 ## Ksi crossing-point detection
 
 ```python
-from zeno_analysis.analysis.ksi_crossing import KsiCrossingPipeline
-from zeno_analysis.plotting.ksi_plot import plot_ksi_curve
+from mpm_analysis.analysis.ksi_crossing import KsiCrossingPipeline
+from mpm_analysis.plotting.ksi_plot import plot_ksi_curve
 
 ksi_pipe = KsiCrossingPipeline.from_result(result, lambda_max=1.55)
 ksi_result = ksi_pipe.run()
@@ -368,8 +368,8 @@ plt.show()
 ## Simulation benchmark
 
 ```python
-from zeno_analysis.pipeline.benchmark_pipeline import BenchmarkPipeline
-from zeno_analysis.simulation.noise import ShotNoise
+from mpm_analysis.pipeline.benchmark_pipeline import BenchmarkPipeline
+from mpm_analysis.simulation.noise import ShotNoise
 
 bench = BenchmarkPipeline(
     clean_records=clean_records,
@@ -413,7 +413,7 @@ DEBUG = True    # forces n_boot=50, max_files=10
 ### 2. Inspect intermediate state
 
 ```python
-from zeno_analysis.analysis.steps import MPMStep
+from mpm_analysis.analysis.steps import MPMStep
 state = MPMStep(order=3).process(records, {})
 print(state["poles_raw"][0])   # poles for first lambda
 ```
@@ -440,7 +440,7 @@ python examples/ex_benchmark_noise.py      # noise sweep, ~1 min
 ### 5. Run shot-noise parity diagnostic
 
 ```bash
-python -m zeno_analysis.diagnostics.shot_noise_parity
+python -m mpm_analysis.diagnostics.shot_noise_parity
 ```
 
 ---

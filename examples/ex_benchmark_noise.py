@@ -15,10 +15,10 @@ Expected output:
 import numpy as np
 import matplotlib.pyplot as plt
 
-from zeno_analysis.simulation.postselected_dynamics import PostSelectedDynamicsSimulator
-from zeno_analysis.simulation.noise import ShotNoise,CompositeNoise
-from zeno_analysis.analysis.steps import MPMStep, BootstrapStep
-from zeno_analysis.pipeline.benchmark_pipeline import BenchmarkPipeline
+from mpm_analysis.simulation.postselected_dynamics import PostSelectedDynamicsSimulator
+from mpm_analysis.simulation.noise import ShotNoise,CompositeNoise
+from mpm_analysis.analysis.steps import MPMStep, BootstrapStep
+from mpm_analysis.pipeline.benchmark_pipeline import BenchmarkPipeline
 
 # ---- Small simulation ----
 sim = PostSelectedDynamicsSimulator(

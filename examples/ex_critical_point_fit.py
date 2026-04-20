@@ -77,8 +77,8 @@ if not json_path.exists():
 # Fit
 # ---------------------------------------------------------------------------
 
-from zeno_analysis.pipeline.critical_point_pipeline import CriticalPointPipeline
-from zeno_analysis.plotting.paper_figures.appendix_bootstrap import plot_appendix_bootstrap
+from mpm_analysis.pipeline.critical_point_pipeline import CriticalPointPipeline
+from mpm_analysis.plotting.paper_figures.appendix_bootstrap import plot_appendix_bootstrap
 import matplotlib.pyplot as plt
 
 cp  = CriticalPointPipeline.from_json(json_path, lambda_max=cfg["lambda_max"])

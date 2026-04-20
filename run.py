@@ -1,21 +1,21 @@
 from __future__ import annotations
 
 from pathlib import Path
-from zeno_analysis.utils.lab_paths import get_lab_path
+from mpm_analysis.utils.lab_paths import get_lab_path
 
 # ===========================================================================
 # GLOBAL SETTINGS
 # ===========================================================================
 
 DEBUG = False          # True → small n_boot, few files, no saving
-N_BOOT = 20         # bootstrap resamples (use 50 for quick tests)
-ORDER = 3              # MPM model order
+N_BOOT = 1000        # bootstrap resamples (use 50 for quick tests)
+ORDER = 5              # MPM model order
 N_LAMBDA_TEST = None   # set to e.g. 10 to load only first 10 files (debug)
 LAMBDA_RANGE = (0,1.5)    # e.g. (0.1, 1.6) — restrict lambda window
 SEED = 15              # RNG seed for bootstrap reproducibility
 
 SHOW_PLOTS  = True     # plt.show() after each task
-SAVE_FIGURES = False   # save figures as PDF into OUTPUT_DIR
+SAVE_FIGURES = True   # save figures as png into OUTPUT_DIR
 
 if DEBUG:
     N_BOOT = 50
@@ -47,18 +47,19 @@ ENSEMBLE_AVERAGE_CSV = get_lab_path(_PS, "results.csv")
 # HMM results CSV; set to None to use lambda_zeno_estimation from JSON
 
 # ---- Output directory ----
-OUTPUT_DIR = Path(__file__).parent / "results"
+OUTPUT_DIR = Path(__file__).parent.parent / "mpm_analysis_output"
 
 # ===========================================================================
 # TASKS
 # ===========================================================================
 
-RUN_ENS_AVG_MPM     = False   # MPM + bootstrap on ensemble-average data
-RUN_POST_SEL_MPM    = False   # MPM + bootstrap on post-selected data
-RUN_PARITY_MPM      = True   # MPM + bootstrap on parity data
-RUN_CRITICAL_POINT  = False # Fit sqrt model from an existing analysis JSON
-RUN_SIMULATION_TEST = False   # Small synthetic simulation (no real data needed)
-RUN_BENCHMARK       = False  # Robustness benchmark with noise injection
+RUN_ENS_AVG_MPM          = False   # MPM + bootstrap on ensemble-average data
+RUN_POST_SEL_MPM         = False   # MPM + bootstrap on post-selected data
+RUN_PARITY_MPM           = True   # MPM + bootstrap on parity data
+RUN_CRITICAL_POINT       = False # Fit sqrt model from an existing analysis JSON
+RUN_SIMULATION_TEST      = False   # Small synthetic simulation (no real data needed)
+RUN_BENCHMARK            = False  # Robustness benchmark with noise injection
+RUN_LIOUVILLIAN_SPECTRUM = False  # 5×5 Liouvillian eigenvalues vs λ at k=π
 
 # For RUN_CRITICAL_POINT: path to a previously saved analysis JSON
 # CRITICAL_POINT_JSON = Path(
@@ -87,20 +88,21 @@ global MPMStep, BootstrapStep
 global PostSelectedDynamicsSimulator, EnsembleAverageLoader, PostSelectedLoader
 global plot_raw_survival, plot_eigenvalue_spectrum
 import matplotlib.pyplot as plt
-from zeno_analysis.pipeline.mpm_pipeline import MPMPipeline
-from zeno_analysis.pipeline.critical_point_pipeline import CriticalPointPipeline
-from zeno_analysis.pipeline.benchmark_pipeline import BenchmarkPipeline
-from zeno_analysis.analysis.steps import MPMStep, BootstrapStep, MPMRRHAStep
-from zeno_analysis.simulation.postselected_dynamics import PostSelectedDynamicsSimulator
-from zeno_analysis.simulation.ensemble_average import EnsembleAverageDynamics
-from zeno_analysis.io.experimental import EnsembleAverageLoader, PostSelectedLoader, ParityLoader
-from zeno_analysis.simulation.noise import ShotNoise
-from zeno_analysis.plotting.exploratory import (
+from mpm_analysis.pipeline.mpm_pipeline import MPMPipeline
+from mpm_analysis.pipeline.critical_point_pipeline import CriticalPointPipeline
+from mpm_analysis.pipeline.benchmark_pipeline import BenchmarkPipeline
+from mpm_analysis.analysis.steps import MPMStep, BootstrapStep, MPMRRHAStep
+from mpm_analysis.simulation.postselected_dynamics import PostSelectedDynamicsSimulator
+from mpm_analysis.simulation.ensemble_average import EnsembleAverageDynamics
+from mpm_analysis.simulation.liouvillian_spectrum import LiouvillianSpectrum
+from mpm_analysis.io.experimental import EnsembleAverageLoader, PostSelectedLoader, ParityLoader
+from mpm_analysis.simulation.noise import ShotNoise
+from mpm_analysis.plotting.exploratory import (
     plot_raw_survival, plot_eigenvalue_spectrum, plot_time_traces_slider
 )
-from zeno_analysis.plotting.paper_figures.appendix_bootstrap import plot_appendix_bootstrap
-from zeno_analysis.analysis.critical_point_guesses import get_guess, list_presets
-from zeno_analysis.io.file_naming import build_figure_filename
+from mpm_analysis.plotting.paper_figures.appendix_bootstrap import plot_appendix_bootstrap
+from mpm_analysis.analysis.critical_point_guesses import get_guess, list_presets
+from mpm_analysis.io.file_naming import build_figure_filename
 
 
 # ===========================================================================
@@ -121,7 +123,7 @@ def _show_and_save(
             figure_tag=figure_tag,
             source_tag=source_tag,
             scan_number=scan_number,
-            extension="pdf",
+            extension="png",
         )
         path = OUTPUT_DIR / filename
         fig.savefig(path, bbox_inches="tight")
@@ -132,27 +134,20 @@ def _show_and_save(
 
 
 def _plot_mpm_result(records, result, tag: str) -> None:
-    """Standard 3-panel diagnostic: raw data, decay rates, frequencies."""
+    """Standard 2-panel diagnostic: raw data, decay rates, frequencies."""
     import numpy as np
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(1, 3, figsize=(20, 6))
+    fig, axes = plt.subplots(1, 2, figsize=(15, 6))
     fig.suptitle(tag, fontsize=14)
 
-    plot_raw_survival(records, observable_key=OBSERVABLE_KEY, ax=axes[0])
-    raw_sigs = np.concatenate([r.signal for r in records if r.observable_key == OBSERVABLE_KEY])
-    finite_pos = raw_sigs[np.isfinite(raw_sigs) & (raw_sigs > 0)]
-    if finite_pos.size == len(raw_sigs[np.isfinite(raw_sigs)]):
-        axes[0].set_yscale("log")
-    axes[0].set_title("Raw curves", fontsize=12)
+    plot_eigenvalue_spectrum(result, ax=axes[0], mode="decay")
+    axes[0].set_title("Decay rates", fontsize=12)
+    axes[0].tick_params(labelsize=10)
 
-    plot_eigenvalue_spectrum(result, ax=axes[1], mode="decay")
-    axes[1].set_title("Decay rates", fontsize=12)
+    plot_eigenvalue_spectrum(result, ax=axes[1], mode="frequency")
+    axes[1].set_title("Frequencies", fontsize=12)
     axes[1].tick_params(labelsize=10)
-
-    plot_eigenvalue_spectrum(result, ax=axes[2], mode="frequency")
-    axes[2].set_title("Frequencies", fontsize=12)
-    axes[2].tick_params(labelsize=10)
 
     for ax in axes:
         ax.tick_params(labelsize=10)
@@ -182,7 +177,7 @@ def run_ens_avg_mpm():
         return None
 
     print(f"\n=== Ensemble-average MPM ===")
-    steps = [MPMStep(order=ORDER, plot_svd=True, n_sv=10), BootstrapStep(n_boot=N_BOOT, seed=SEED)]
+    steps = [MPMStep(order=ORDER, plot_svd=True, n_sv=10, save_dir=OUTPUT_DIR), BootstrapStep(n_boot=N_BOOT, seed=SEED)]
     csv = ENSEMBLE_AVERAGE_CSV if (ENSEMBLE_AVERAGE_CSV and ENSEMBLE_AVERAGE_CSV.exists()) else None
     if csv is None:
         print("[post_sel] CSV not found, using lambda_zeno_estimation from JSON")
@@ -236,7 +231,7 @@ def run_parity_mpm():
     plot_raw_survival(records, observable_key=OBSERVABLE_KEY, ax=ax)
     ax.set_title("Parity curves")
     print(f"\n=== Parity MPM ===")
-    steps = [MPMStep(order=ORDER + 1, plot_svd=True), BootstrapStep(n_boot=N_BOOT, seed=SEED)]
+    steps = [MPMStep(order=ORDER, plot_svd=True, save_dir=OUTPUT_DIR), BootstrapStep(n_boot=N_BOOT, seed=SEED)]
     pipeline = MPMPipeline.from_parity(
         folder,
         observables=OBSERVABLE_KEY,
@@ -256,7 +251,7 @@ def run_parity_curves_mpm_fit():
     folder = Path(PARITY_FOLDER)
     records = ParityLoader().load(folder, observables=OBSERVABLE_KEY,
                                   lambda_range=LAMBDA_RANGE, max_files=N_LAMBDA_TEST)
-    plot_time_traces_slider(records, observable_key=OBSERVABLE_KEY, log_scale=False, mpm_order=ORDER + 1)
+    plot_time_traces_slider(records, observable_key=OBSERVABLE_KEY, log_scale=False, mpm_order=ORDER)
 
 
 def run_critical_point(result=None, guess=None, json_path=None):
@@ -321,6 +316,16 @@ def run_simulation_test():
     return result
 
 
+def run_liouvillian_spectrum():
+    """Plot eigenvalues of the 5×5 Liouvillian vs λ at k=π."""
+    print("\n=== Liouvillian spectrum (k=π) ===")
+    sim = LiouvillianSpectrum(
+    )
+    fig, _ = sim.plot()
+    fig.suptitle("5×5 Liouvillian eigenvalues vs λ  (k=π)", fontsize=13)
+    _show_and_save(fig, "liouvillian_spectrum", source_tag="theory")
+
+
 def run_benchmark():
     """Test analysis robustness with injected Gaussian noise."""
     print(f"\n=== Benchmark ===")
@@ -374,5 +379,8 @@ if __name__ == "__main__":
 
     if RUN_BENCHMARK:
         run_benchmark()
+
+    if RUN_LIOUVILLIAN_SPECTRUM:
+        run_liouvillian_spectrum()
 
     print("\nDone.")
