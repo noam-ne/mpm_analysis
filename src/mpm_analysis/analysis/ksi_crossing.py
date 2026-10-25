@@ -260,6 +260,109 @@ def linfit_zero_crossing(
     return x0
 
 
+def quadfit_zero_crossing(
+    lambdas: np.ndarray,
+    values: np.ndarray,
+    *,
+    sigma: np.ndarray | None = None,
+    n_points: int = 10,
+    direction: str = "any",
+    return_fit: bool = False,
+):
+    """Zero of a quadratic fitted to the ``n_points`` nearest the first crossing.
+
+    The paper's recipe for the state-freezing exponent (Methods / SI 7B):
+    no functional form of ξ(λ) is assumed; a local quadratic through the ten
+    measured values nearest the sign change is solved for its root inside
+    that window.  Of the two roots the one closest to the interpolated sign
+    change is taken.
+
+    Parameters
+    ----------
+    lambdas, values:
+        The curve, e.g. λ and ξ(λ); NaN values are skipped.
+    sigma:
+        Optional 1-σ error bars → weighted fit (weights 1/σ; a point whose σ
+        is missing or zero gets the window median).
+    n_points:
+        Number of finite points nearest the sign change to fit (≥ 4).
+    direction:
+        Passed to :func:`find_zero_crossings` for the seed.
+    return_fit:
+        Also return ``dict(coef=[c2, c1, c0], window=bool mask,
+        n_points=..., weighted=bool)`` (``coef`` ``None`` when no fit).
+
+    Returns
+    -------
+    float or (float, dict)
+        The fitted crossing (NaN if there is none or too few points).
+    """
+    lam = np.asarray(lambdas, dtype=float)
+    val = np.asarray(values, dtype=float)
+    sig = None if sigma is None else np.asarray(sigma, dtype=float)
+    n_points = max(int(n_points), 4)
+    cross = find_zero_crossings(lam, val, direction=direction)
+    x0 = cross[0] if cross else np.nan
+    fit = dict(coef=None, window=None, n_points=n_points, weighted=False)
+    finite = np.isfinite(val) & np.isfinite(lam)
+    if np.isfinite(x0) and finite.sum() >= 4:
+        idx = np.flatnonzero(finite)
+        nearest = idx[np.argsort(np.abs(lam[idx] - x0), kind="stable")[:n_points]]
+        w = np.zeros_like(finite)
+        w[nearest] = True
+        weights = None
+        if sig is not None:
+            s = sig[w]
+            ok = np.isfinite(s) & (s > 0)
+            if ok.any():
+                weights = 1.0 / np.where(ok, s, np.median(s[ok]))
+        coef = np.polyfit(lam[w], val[w], 2, w=weights)
+        roots = np.roots(coef)
+        real = roots[np.abs(roots.imag) < 1e-9].real
+        lo, hi = lam[w].min(), lam[w].max()
+        inside = real[(real >= lo) & (real <= hi)]
+        cand = inside if inside.size else real
+        x0 = float(cand[np.argmin(np.abs(cand - x0))]) if cand.size else np.nan
+        fit = dict(coef=coef, window=w, n_points=n_points, weighted=weights is not None)
+    else:
+        x0 = np.nan
+    if return_fit:
+        return float(x0), fit
+    return float(x0)
+
+
+def zero_crossing(
+    lambdas: np.ndarray,
+    values: np.ndarray,
+    *,
+    method: str = "first",
+    sigma: np.ndarray | None = None,
+    half_width: float = 0.15,
+    n_points: int = 10,
+    direction: str = "any",
+    return_fit: bool = False,
+):
+    """First zero of a curve by ``method``: ``"first"`` (linear interpolation of
+    the bracketing pair, :func:`find_zero_crossings`), ``"linfit"``
+    (:func:`linfit_zero_crossing` over ``±half_width``) or ``"quadfit"``
+    (:func:`quadfit_zero_crossing` through the ``n_points`` nearest points).
+    Returns NaN without a crossing; with ``return_fit`` also the fit dict
+    (``None`` for ``"first"``).
+    """
+    if method == "first":
+        c = find_zero_crossings(lambdas, values, direction=direction)
+        x0 = float(c[0]) if c else np.nan
+        return (x0, None) if return_fit else x0
+    if method == "linfit":
+        return linfit_zero_crossing(lambdas, values, sigma=sigma, half_width=half_width,
+                                    direction=direction, return_fit=return_fit)
+    if method == "quadfit":
+        return quadfit_zero_crossing(lambdas, values, sigma=sigma, n_points=n_points,
+                                     direction=direction, return_fit=return_fit)
+    raise ValueError(f"zero_crossing: unknown method '{method}' "
+                     "(expected 'first', 'linfit' or 'quadfit').")
+
+
 def ksi_crossing_samples(
     samples,
     *,
@@ -268,6 +371,9 @@ def ksi_crossing_samples(
     lambda_max: float | None = None,
     direction: str = "any",
     ignore_above: float | None = None,
+    method: str = "first",
+    half_width: float = 0.15,
+    n_points: int = 10,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Per-bootstrap-universe ξ analysis on raw pole samples.
 
@@ -289,6 +395,10 @@ def ksi_crossing_samples(
         slicing a ``PolesResult`` drops ``raw_samples``.
     direction, ignore_above:
         Passed to ``find_zero_crossings``.
+    method, half_width, n_points:
+        How the per-draw crossing is located (:func:`zero_crossing`):
+        ``"first"`` (default, the bracketing pair), ``"linfit"`` or
+        ``"quadfit"``.
 
     Returns
     -------
@@ -305,25 +415,52 @@ def ksi_crossing_samples(
         arr = arr[mask]
 
     n_boot = arr.shape[1]
-    crossings = np.full(n_boot, np.nan)
     ksi_curves = np.full((n_boot, len(lam)), np.nan)
     for b in range(n_boot):
-        ksi_b = compute_ksi_from_real_parts(
+        ksi_curves[b] = compute_ksi_from_real_parts(
             arr[:, b, :].real, pole_idx1=pole_idx1, pole_idx2=pole_idx2
         )
-        ksi_curves[b] = ksi_b
-        cross_b = find_zero_crossings(
-            lam, ksi_b, direction=direction, ignore_above=ignore_above
-        )
-        if cross_b:
-            crossings[b] = cross_b[0]
+    return crossing_samples_from_curves(
+        lam, ksi_curves, method=method, half_width=half_width, n_points=n_points,
+        direction=direction, ignore_above=ignore_above,
+    )
 
+
+def crossing_samples_from_curves(
+    lam: np.ndarray,
+    curves: np.ndarray,
+    *,
+    method: str = "first",
+    half_width: float = 0.15,
+    n_points: int = 10,
+    direction: str = "any",
+    ignore_above: float | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Per-draw first zero crossing + 16/84 band of a stack of curves.
+
+    ``curves`` has shape (n_boot, n_lambda) — one ξ(λ) (or Δ(λ)) per
+    bootstrap draw, from whichever route produced it.  Returns
+    ``(crossings (n_boot,), lo (n_lambda,), hi (n_lambda,))``.
+    """
+    curves = np.asarray(curves, dtype=float)
+    n_boot = curves.shape[0]
+    crossings = np.full(n_boot, np.nan)
+    for b in range(n_boot):
+        if method == "first":
+            cross_b = find_zero_crossings(lam, curves[b], direction=direction,
+                                          ignore_above=ignore_above)
+            if cross_b:
+                crossings[b] = cross_b[0]
+        else:
+            crossings[b] = zero_crossing(lam, curves[b], method=method,
+                                         half_width=half_width, n_points=n_points,
+                                         direction=direction)
     # All-NaN lambda slices are expected (failed draws) — summarise quietly.
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
-        ksi_lo = np.nanpercentile(ksi_curves, 16.0, axis=0)
-        ksi_hi = np.nanpercentile(ksi_curves, 84.0, axis=0)
-    return crossings, ksi_lo, ksi_hi
+        lo = np.nanpercentile(curves, 16.0, axis=0)
+        hi = np.nanpercentile(curves, 84.0, axis=0)
+    return crossings, lo, hi
 
 
 def discriminant_from_params(params: np.ndarray, order: int) -> np.ndarray:

@@ -326,7 +326,7 @@ def plot_real_parts(ax, sorted_vals):
 
 
 def plot_imag_parts(ax, sorted_vals):
-    """Bottom-row panel: Im e_n, same branch ordering and dash trick."""
+    """Bottom-row panel: Im e_k, same branch ordering and dash trick."""
     ax.plot(lams, np.imag(sorted_vals[:, 0]),
             color=colors["e3"], lw=LINE_WIDTH, solid_capstyle="round",
             zorder=1)
@@ -399,8 +399,8 @@ for ax in (ax_ii, ax_ri):
     ax.set_xticklabels(["0.5", "1.0", "1.5"])
     make_ax_lines_wider(ax, labelsize=TICK_LABEL_SIZE, linewidth=LINE_WIDTH)
 
-ax_ir.set_ylabel(r"$-\mathrm{Re}(e_n)/\Omega_\mathrm{S}$")
-ax_ii.set_ylabel(r"$\mathrm{Im}(e_n)/\Omega_\mathrm{S}$")
+ax_ir.set_ylabel(r"$-\mathrm{Re}(e_k)/\Omega_\mathrm{S}$")
+ax_ii.set_ylabel(r"$\mathrm{Im}(e_k)/\Omega_\mathrm{S}$")
 
 # put both y labels at the same x position so they stack exactly
 fig.align_ylabels([ax_ir, ax_ii])

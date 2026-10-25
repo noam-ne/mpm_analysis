@@ -23,7 +23,8 @@ class BootstrapStep(AnalysisStep):
     Parameters
     ----------
     n_boot:
-        Number of bootstrap resamples per lambda slice.
+        Number of bootstrap resamples per lambda slice.  ``0`` → no
+        bootstrap: the measured fit with zero error bars and no draws.
     order:
         Model order.  If ``None``, uses ``state["poles_raw"][0].shape[0]``.
     seed:
@@ -33,12 +34,19 @@ class BootstrapStep(AnalysisStep):
         statistics (multinomial / binomial, from
         ``record.metadata["bootstrap_stats"]``), rerun stacked MPM + LSQ
         refinement per draw.  The statistically correct default.
+        ``"errorbar"`` — same per-draw analysis as ``"data"``, but every
+        point of every trace is drawn as ``mean + sigma · N(0, 1)`` from its
+        measured per-point error bar ``record.sigma`` (the block standard
+        errors ``run_pooled_p0.py`` writes from the raw NPZ) — see
+        ``bootstrap.bootstrap_errorbar_measurements``.
         ``"residual"`` — residual resampling + MPM refit per draw (legacy).
         ``"parametric"`` — Monte-Carlo covariance propagation: Gaussian draws
         of the refinement parameter vector from its least-squares covariance
         (requires a ``RefineStep`` before this step; NOT a bootstrap).
-        All modes Hungarian-match draws to the clean poles and produce the
-        same kind of samples; central values stay the measured best fit.
+        All modes put every draw in the canonical slot order of
+        ``pole_sorting`` (the measured fit's order) and produce the same kind
+        of samples; central values stay the measured best fit.  Draws with a
+        Nyquist-aliased pole are dropped from the error bars.
     n_jobs:
         Parallel workers for ``mode="data"`` (process pool across lambdas).
         ``-1`` → all cores.
@@ -57,13 +65,14 @@ class BootstrapStep(AnalysisStep):
         mode: str = "residual",
         n_jobs: int = -1,
         pencil: bool = True,
+        center: str = "measured",
     ) -> None:
-        if mode not in ("data", "residual", "parametric"):
+        if mode not in ("data", "errorbar", "residual", "parametric"):
             raise ValueError(f"BootstrapStep: unknown mode '{mode}'.")
-        if not pencil and mode != "data":
+        if not pencil and mode not in ("data", "errorbar"):
             raise ValueError(
                 "BootstrapStep: pencil=False (refine-only draws) is only "
-                "available in mode='data'."
+                "available in mode='data' / 'errorbar'."
             )
         self.n_boot = n_boot
         self.order = order
@@ -71,6 +80,12 @@ class BootstrapStep(AnalysisStep):
         self.mode = mode
         self.n_jobs = n_jobs
         self.pencil = pencil
+        # "measured": central poles = fit of the original data, 16/84 of the draws
+        # around it.  "draws": mean ± std of the draws (the measured curve is
+        # then just one more sample — the right reading of mode="errorbar").
+        if center not in ("measured", "draws"):
+            raise ValueError("BootstrapStep: center must be 'measured' or 'draws'.")
+        self.center = center
 
     def process(
         self,
@@ -98,9 +113,23 @@ class BootstrapStep(AnalysisStep):
 
         rng = np.random.default_rng(self.seed)
 
+        if self.n_boot == 0:
+            # No bootstrap: central poles = the measured fit, zero error bars,
+            # no draws (result.poles.raw_samples is None).
+            from mpm_analysis.analysis.bootstrap import _LambdaBootstrapResult
+            empty = np.empty((0, order))
+            boot_results = [_LambdaBootstrapResult(float(lam), empty, empty)
+                            for lam in state["lambdas"]]
+            state["boot_results"] = boot_results
+            state["poles_result"] = aggregate_bootstrap(
+                boot_results, observable_key=obs_key,
+                center_poles=state.get("poles_raw"), center="measured",
+            )
+            return state
+
         if self.mode == "parametric":
             boot_results = self._parametric_draws(state, order, rng)
-        elif self.mode == "data":
+        elif self.mode in ("data", "errorbar"):
             from mpm_analysis.analysis.bootstrap import run_data_bootstrap
             boot_results = run_data_bootstrap(
                 records,
@@ -113,6 +142,7 @@ class BootstrapStep(AnalysisStep):
                 refine_settings=state.get("refine_settings"),
                 n_jobs=self.n_jobs,
                 pencil=self.pencil,
+                resampler="counts" if self.mode == "data" else "errorbar",
             )
         else:
             # Pass the per-slice pencil parameters, not a single representative:
@@ -127,12 +157,14 @@ class BootstrapStep(AnalysisStep):
                 rng=rng,
                 clean_poles=state.get("poles_raw"),
             )
-        # Central values = fit of the ORIGINAL measured dataset; draws only
-        # set the uncertainty intervals.
+        # center="measured": central values = fit of the ORIGINAL measured
+        # dataset, draws only set the uncertainty intervals.
+        # center="draws":    mean ± std of the draws.
         poles_result = aggregate_bootstrap(
             boot_results,
             observable_key=obs_key,
             center_poles=state.get("poles_raw"),
+            center=self.center,
         )
 
         state["boot_results"] = boot_results
@@ -147,7 +179,7 @@ class BootstrapStep(AnalysisStep):
             unpack_pole_params,
             pack_pole_params,
         )
-        from mpm_analysis.analysis.pole_sorting import match_poles_hungarian
+        from mpm_analysis.analysis.pole_sorting import sort_poles_canonical
 
         params = state.get("refine_params")
         covs = state.get("refine_cov")
@@ -178,7 +210,6 @@ class BootstrapStep(AnalysisStep):
                 draws = rng.multivariate_normal(
                     p_opt, cov_sym, size=self.n_boot, method="svd"
                 )
-                reference = np.asarray(clean_poles[i], dtype=complex)
                 M = len(p_opt)
                 for b in range(self.n_boot):
                     if conjugate:
@@ -188,7 +219,7 @@ class BootstrapStep(AnalysisStep):
                         poles_b = draws[b][: M // 2] + 1j * draws[b][M // 2:]
                         if np.all(np.isfinite(poles_b)):
                             boot_params[b] = pack_pole_params(poles_b)
-                    poles_b = match_poles_hungarian(poles_b, reference)
+                    poles_b = sort_poles_canonical(poles_b)
                     boot_real[b] = poles_b.real
                     boot_imag[b] = poles_b.imag
             except Exception as exc:

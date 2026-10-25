@@ -20,11 +20,19 @@ def make_third_transition_figure(
     panel_a_records,
     *,
     fit_dir: Path | None = None,
+    panel_a_fit_result=None,
+    panel_a_observable: str = "survival",
     target_lambdas: np.ndarray | None = None,
     lambda_max_b: float | None = 1.55,
+    downsample_a: int = 2,
+    downsample_b: int = 2,
+    keep_all_within_b: float | None = None,
+    keep_first_b: int = 0,
+    transition_label: str | None = "Quantum\nZeno",
     save_dir: Path | None = None,
     figure_stem: str = "third_transition_main_text_figure",
     yticks_freq: list | None = None,
+    ylim_decay_b: tuple[float, float] | None = None,
 ) -> "plt.Figure":
     """Build the two-panel main-text figure.
 
@@ -36,17 +44,38 @@ def make_third_transition_figure(
         ``list[ObservableRecord]`` for panel A (p1 linecuts).
     fit_dir:
         If given, overlay fit curves in panel A from this directory.
+    panel_a_fit_result:
+        ``ZenoAnalysisResult`` whose poles draw the panel-A overlays instead
+        of ``fit_dir`` (pass ``panel_b_result`` for the analysis's own fit).
+    panel_a_observable:
+        Observable key of the panel-A records (``"survival"`` and ``"D"`` are
+        both ``D_probability`` for the ensemble-average loader).
     target_lambdas:
         Lambda values to select for panel A linecuts.
         Default: ``[0.4, 1.1, 1.5]``.
     lambda_max_b:
         Upper λ cutoff for panel B.
+    downsample_a, downsample_b:
+        Plot every n-th time point of the panel-A traces / every n-th λ
+        point of panel B (1 → all).
+    keep_all_within_b:
+        Panel B: λ half-width around the transition line (λ_c) inside which
+        every point is plotted; ``downsample_b`` thins only the rest.
+        ``None`` → ``downsample_b`` everywhere.
+    keep_first_b:
+        Panel B: the first ``keep_first_b`` λ points are always plotted.
+    transition_label:
+        Text written right of the panel-B transition line (λ_c of the sqrt
+        fit) behind a short arrow, near the top; ``None`` → no label.
     save_dir:
         If given, save SVG + PDF to this directory.
     figure_stem:
         Filename stem (no extension).
     yticks_freq:
         Y-tick positions for the right frequency axis in panel B.
+    ylim_decay_b:
+        Fixed (bottom, top) of panel B's decay-rate axis (error bars beyond
+        it are clipped); ``None`` → autoscale.
 
     Returns
     -------
@@ -81,7 +110,9 @@ def make_third_transition_figure(
         target_lambdas=target_lambdas,
         colors=LINECUT_COLORS,
         fit_dir=fit_dir,
-        downsample=3,
+        fit_result=panel_a_fit_result,
+        downsample=downsample_a,
+        observable_key=panel_a_observable,
     )
 
     # ---- Panel B ----
@@ -89,12 +120,24 @@ def make_third_transition_figure(
         panel_b_result,
         ax=ax_b,
         lambda_max=lambda_max_b,
-        pole_selection="second_smallest_decay",
-        downsample=3,
+        pole_selection=1,                 # slot 1 = "Pole 2" (orange in the spectrum plot)
+                                          #   on both sides of the EP, with its own error bars
+        downsample=downsample_b,
+        keep_all_within=keep_all_within_b,
+        keep_first=keep_first_b,
         show_sqrt_fit=True,
         show_critical_line=True,
         yticks_freq=yticks_freq or [0.0, 0.4, 0.8],
+        ylim_decay=ylim_decay_b,
     )
+
+    # ---- "→ Quantum Zeno" beside the transition line ----
+    sqrt_fit = panel_b_result.critical_point_sqrt_fit
+    if transition_label and sqrt_fit is not None:
+        _add_transition_label(
+            ax_b, sqrt_fit.lambda_c, transition_label,
+            LAMBDA_OBS_COLOR, LABELS_FONT_SIZE, LINE_WIDTH,
+        )
 
     # ---- Lambda arrows below panel B ----
     _add_lambda_arrows(ax_b, plotted_lambdas, LINECUT_COLORS, LINE_WIDTH)
@@ -128,6 +171,26 @@ def _add_lambda_arrows(ax, lambdas: list[float], colors: list, arrow_lw: float) 
             zorder=20,
             clip_on=False,
         )
+
+
+def _add_transition_label(ax, lam: float, label: str, color, fontsize: float, lw: float) -> None:
+    """Arrow from the transition line at *lam* to *label*, near the top of *ax*."""
+    from matplotlib.transforms import blended_transform_factory
+
+    trans = blended_transform_factory(ax.transData, ax.transAxes)
+    y, arrow_pt = 0.86, 10.0          # height (axes fraction), arrow length (pt)
+    ax.annotate(
+        "", xy=(lam, y), xycoords=trans,
+        xytext=(arrow_pt, 0.0), textcoords="offset points",
+        arrowprops=dict(arrowstyle="<-", color=color, lw=lw * 0.7,
+                        shrinkA=0, shrinkB=0),
+    )
+    # va="top" raised by ~0.6 em puts the FIRST line's centre on the arrow.
+    ax.annotate(
+        label, xy=(lam, y), xycoords=trans,
+        xytext=(arrow_pt + 1.5, 0.6 * fontsize), textcoords="offset points",
+        ha="left", va="top", color=color, fontsize=fontsize, linespacing=1.0,
+    )
 
 
 def _add_panel_letter(ax, letter: str, mm_to_inch_fn, fontsize: int) -> None:

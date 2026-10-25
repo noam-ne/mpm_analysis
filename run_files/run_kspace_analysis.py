@@ -39,7 +39,7 @@ from mpm_analysis.utils.lab_paths import get_lab_path
 
 # ---- Source + data location ----
 SOURCE = "json"          # "json" | "compressed" | "simulated"
-SCAN_NUMBER = 41
+SCAN_NUMBER = 11
 
 # "simulated" points directly at a click_record_raw_*.npz file produced by
 # misc/generate_click_record_raw.py — set the path and skip the lab-path
@@ -71,7 +71,7 @@ SVD_THRESHOLD = 0.2
 N_BOOTSTRAP = 1                # residual resampling inside KSpaceAnalysis
 BOOTSTRAP_OVER_RUNS = False    # compressed only: per-run analysis -> pole error bars
 SIGNAL_COMPONENT = "complex"   # "complex" | "real" | "imag"
-T_MAX_US = 25                # max time to load from experimental records (µs), default is None
+T_MAX_US = None                # max time to load from experimental records (µs), default is None
 LAMBDA_RANGE = None
 MAX_FILES = None               # json source only
 K_INDEX_RANGE = (1,-1)# None keeps the full selected/recomputed k grid
@@ -105,7 +105,7 @@ MIN_ALIVE_FRAC = 0.98
 #     unconditional).  Keys: partial_click / partial_no_click.
 CORR_MODE = "conditional"
 CORR_MAX_CLICKS = None          # only for mode="partial": int >= 0
-CORR_OBSERVABLES = None        # None = both channels of the chosen mode
+CORR_OBSERVABLES = True        # None = both channels of the chosen mode
 CORR_MAX_TIME_US = None        # largest time (us); None = full record
 # Truncate once too few runs are still recorded.  Only ever active for the
 # compressed source, whose per-shot compressed lengths differ.
@@ -143,11 +143,11 @@ THEORY = dict(
 )
 
 # ---- Output / figures ----
-SAVE_RESULT = True
-SAVE_FIGURES = True
+SAVE_RESULT = False
+SAVE_FIGURES = False
 OPEN_FIGURES = True            # pop the saved figures/HTML open after the run
-INCLUDE_3D = True
-INCLUDE_HTML = True
+INCLUDE_3D = False
+INCLUDE_HTML = False
 GRID_N_PANELS = 25
 GRID_N_COLS = 5
 RAW_COMPONENT = "real"

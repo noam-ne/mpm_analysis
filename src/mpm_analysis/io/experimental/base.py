@@ -76,7 +76,33 @@ def _load_json(path: Path, *, retries: int = 5, delay: float = 3.0) -> dict:
 # the same t=0 normalisation anchor as the survival observables.  The Bloch
 # coordinates (X/Y/Z) and the raw shot counts are measurements at t=0 and are
 # never touched by ``init_error``.
-_INIT_ERROR_STAT_FIELDS = ("survival", "SX", "SZ", "S_pooled")
+_INIT_ERROR_STAT_FIELDS = ("survival", "SX", "SZ", "S_pooled", "S_pooled_strict")
+
+
+def _defined_length(extractors: dict, jd: dict, t: np.ndarray,
+                    observables: list[str]) -> int:
+    """Samples from the record start up to the last time EVERY observable is defined.
+
+    An observable can be undefined at the end of the record by construction
+    (``S_pooled_strict`` has no segment beyond the last bin, stored as
+    null -> NaN).  The record then ends at the last finite sample of the
+    shortest observable.  Only a trailing run of non-finite samples counts:
+    a NaN inside the record is left to the caller (cutting it out would
+    break the uniform time grid the pencil assumes).  Extractors that fail
+    here are skipped; ``load`` reports them in its own loop.
+    """
+    n = t.size
+    for key in observables:
+        try:
+            y = np.asarray(extractors[key](jd, t), dtype=float)
+        except Exception:
+            continue
+        if y.ndim != 1 or y.size != t.size:
+            continue
+        finite = np.flatnonzero(np.isfinite(y))
+        if finite.size:                       # all-NaN: leave it to the caller
+            n = min(n, int(finite[-1]) + 1)
+    return n
 
 
 def _apply_init_error(y: np.ndarray, init_error: float) -> tuple[np.ndarray, bool]:
@@ -229,6 +255,18 @@ class ExperimentalLoader(ABC):
     ) -> tuple[float, np.ndarray]:
         """Extract (lambda_val, t_us) from the raw JSON dict."""
 
+    def _point_sigma(self, jd: dict, key: str) -> np.ndarray | None:
+        """Per-point 1-sigma error bar of observable ``key``, on the file's
+        FULL time axis (the loader applies the window / drop mask).
+
+        Subclasses return the measured error bar when the file carries one
+        (e.g. the block standard errors ``run_pooled_p0.py`` writes into
+        ``data.p_0_t_errorbar_meta``); it lands in ``record.sigma`` and is
+        what the ``errorbar`` bootstrap resamples from.  Default: ``None``
+        (no error bar known for this observable).
+        """
+        return None
+
     def _bootstrap_stats(self, jd: dict, mask: np.ndarray | None) -> dict | None:
         """Measurement statistics for the data-resampling bootstrap.
 
@@ -280,6 +318,7 @@ class ExperimentalLoader(ABC):
         lambda_range: tuple[float, float] | None = None,
         max_files: int | None = None,
         t_max: float | None = None,
+        t_min: float | None = None,
         drop_first_point: bool = False,
         init_error: float | None = None,
         splice_index: int | None = None,
@@ -304,11 +343,20 @@ class ExperimentalLoader(ABC):
         t_max:
             If given, truncate each signal to times ``t <= t_max`` (in µs).
             Default ``None`` loads the full time axis.
+        t_min:
+            If given, also discard times ``t < t_min`` (in µs), so the
+            analysis fits the window ``[t_min, t_max]``.  Applied with the
+            same mask as ``t_max`` to the time axis, every observable and
+            the bootstrap statistics.  Default ``None`` keeps the start.
         drop_first_point:
             If ``True``, discard the first sample of the time axis (and of
             every signal and bootstrap-statistics array) of each file, so the
             whole analysis — MPM, refinement, bootstrap, plots — never sees
             it.  Default ``False`` keeps every point.
+            (Independently of this, trailing samples that a requested
+            observable leaves undefined — NaN, e.g. the last point of
+            ``S_pooled_strict`` — are cut from the end of every observable
+            and of the bootstrap statistics of that file.)
         init_error:
             Initialisation error ``eps`` in ``[0, 1)``.  When given, a first
             sample of exactly ``1`` — the t=0 normalisation anchor, not a
@@ -396,6 +444,7 @@ class ExperimentalLoader(ABC):
         splice_hits: dict[str, int] = {}    # observables the splice rewrote
         splice_stat_files = 0               # files whose stats were spliced
         splice_failed: list[str] = []       # files where the source was unusable
+        trimmed: dict[int, int] = {}        # trailing undefined samples cut -> files
         for fp in files:
             try:
                 jd = _load_json(fp)
@@ -409,15 +458,29 @@ class ExperimentalLoader(ABC):
                 skipped.append((fp.name, str(exc)))
                 continue
 
-            # One mask for the whole file: the t_max cut and the optional
-            # drop of the first sample.  Everything time-dependent (the time
-            # axis, every observable, the bootstrap statistics) is sliced by
-            # this same mask, so the arrays can never drift apart.
-            mask = t_us <= t_max if t_max is not None else None
+            # One mask for the whole file: the [t_min, t_max] window and the
+            # optional drop of the first sample.  Everything time-dependent
+            # (the time axis, every observable, the bootstrap statistics) is
+            # sliced by this same mask, so the arrays can never drift apart.
+            mask = None
+            if t_max is not None:
+                mask = t_us <= t_max
+            if t_min is not None:
+                keep = t_us >= t_min
+                mask = keep if mask is None else (mask & keep)
             if drop_first_point and t_us.size:
                 if mask is None:
                     mask = np.ones(t_us.shape, dtype=bool)
                 mask[0] = False
+            # Observables undefined at the record end (S_pooled_strict's last
+            # point) end the record — for every observable of the file, so a
+            # joint fit keeps one time axis.
+            n_defined = _defined_length(self._extractors, jd, t_us, observables)
+            n_trim = t_us.size - n_defined
+            if n_trim:
+                if mask is None:
+                    mask = np.ones(t_us.shape, dtype=bool)
+                mask[n_defined:] = False
             if mask is not None:
                 t_us = t_us[mask]
             # Whether the t=0 sample survived the mask — init_error has
@@ -427,6 +490,8 @@ class ExperimentalLoader(ABC):
             if lambda_range is not None:
                 if not (lambda_range[0] <= lambda_val <= lambda_range[1]):
                     continue
+            if n_trim:
+                trimmed[n_trim] = trimmed.get(n_trim, 0) + 1
 
             # Build metadata dict from file
             params = jd.get("parameters", jd)
@@ -494,8 +559,18 @@ class ExperimentalLoader(ABC):
                                 f"{fp.name}: {key}[{splice_index}] not spliced "
                                 "(source point missing or NaN)"
                             )
+                    sigma = self._point_sigma(jd, key)
+                    if sigma is not None:
+                        sigma = np.asarray(sigma, dtype=float)
+                        if sigma.shape != np.shape(signal):
+                            raise ValueError(
+                                f"{fp.name}: error bar of '{key}' has shape "
+                                f"{sigma.shape}, the signal {np.shape(signal)}."
+                            )
                     if mask is not None:
                         signal = signal[mask]
+                        if sigma is not None:
+                            sigma = sigma[mask]
                     records.append(
                         ObservableRecord(
                             lambda_val=lambda_val,
@@ -504,10 +579,16 @@ class ExperimentalLoader(ABC):
                             observable_key=key,
                             source_file=fp.name,
                             metadata=meta,
+                            sigma=sigma,
                         )
                     )
                 except Exception as exc:
                     print(f"Warning: could not extract '{key}' from {fp.name}: {exc}")
+
+        if trimmed:
+            print("[load] record end trimmed to the last sample every observable "
+                  f"defines ({', '.join(observables)}): "
+                  + ", ".join(f"{k} point(s) in {n} file(s)" for k, n in sorted(trimmed.items())))
 
         if skipped:
             print(f"Warning: skipped {len(skipped)}/{len(files)} files:")

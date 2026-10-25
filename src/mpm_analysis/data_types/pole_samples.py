@@ -23,10 +23,12 @@ class PoleSamples:
     ----------
     samples:
         Complex array of shape ``(n_lambda, n_boot, order)``.
-        Within each draw, poles are Hungarian-matched to the clean
-        (branch-tracked) poles of that lambda, so a fixed column index means
-        one continuous branch — and draw ``b`` across all lambdas is one
-        complete synthetic realization of the scan.
+        Every pole set (draws and clean poles alike) is in the canonical
+        slot order of ``analysis.pole_sorting`` (slots 0, 1 = the EP pair,
+        slot 2 = the slow pole for order 3), so a fixed column index means
+        the same pole everywhere — and draw ``b`` across all lambdas is one
+        complete synthetic realization of the scan.  Draws with a
+        Nyquist-aliased pole are NaN rows.
     observable_key:
         The observable key used to produce these samples.
     lambda_values:

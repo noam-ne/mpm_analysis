@@ -19,7 +19,7 @@ from mpm_analysis.data_types.pole_samples import PoleSamples
 from mpm_analysis.analysis.pole_sorting import (
     sort_poles_canonical,
     enforce_pole_count,
-    match_poles_hungarian,
+    aliased_pole_mask,
 )
 
 
@@ -85,8 +85,8 @@ def run_bootstrap(
         Optional per-slice clean poles (aligned with the lambda-sorted
         slices, e.g. ``state["poles_raw"]`` after a ``RefineStep``).  When
         given they define the clean model whose residuals are resampled, and
-        every draw's poles are Hungarian-matched to them so bootstrap indices
-        follow the same branches.  Per-draw refits remain plain MPM (a
+        every draw is put in the same canonical slot order (``pole_sorting``)
+        so bootstrap indices mean the same poles.  Per-draw refits remain plain MPM (a
         nonlinear refinement per draw would multiply runtime ~100×); the
         refined model only shapes the residual pool and the branch labels.
 
@@ -154,6 +154,7 @@ def run_bootstrap(
             y_clean = reconstruct_signal(t, poles_clean, amps_clean)
             residuals = y - y_clean
 
+            dt = float(np.mean(np.diff(t)))
             for b in range(n_boot):
                 if joint:
                     # One time-index draw shared by all observables: keeps
@@ -165,11 +166,12 @@ def run_bootstrap(
                         residuals, size=len(residuals), replace=True
                     )
                 poles_b, _, _ = matrix_pencil_method(t, y_boot, order, L=L_fit)
-                # Hungarian match to the clean poles: draw index i means the
-                # same branch as clean pole i (no label switching).
-                poles_b = match_poles_hungarian(
-                    enforce_pole_count(poles_b, order), poles_clean
-                )
+                # Same canonical slot order as the clean poles (pole_sorting);
+                # a draw with a Nyquist-aliased pole is a sampling artefact
+                # and stays NaN, so it never enters the percentiles.
+                poles_b = sort_poles_canonical(enforce_pole_count(poles_b, order))
+                if aliased_pole_mask(poles_b, dt).any():
+                    continue
                 boot_real[b] = poles_b.real
                 boot_imag[b] = poles_b.imag
                 if np.all(np.isfinite(poles_b)):
@@ -268,11 +270,34 @@ _POST_SELECTED_SURVIVAL = {
     # (see ``_resample_pooled_survival``); the per-point binomial below is
     # only the fallback for stats without the histogram.
     "S_pooled": ("S_pooled", "N_attempts_S_pooled"),
+    # The same pool without each segment's own last bin (segments L > i only;
+    # the record ends one bin earlier) — same histogram, same draw.
+    "S_pooled_strict": ("S_pooled_strict", "N_attempts_S_pooled_strict"),
 }
 
+# Pooled curves rebuilt from the first-click histogram: observable key ->
+# ``min_extra_bins`` of ``pooled_survival_from_counts`` (1 = leave out the
+# segment that ends at t_i, whose last bin reads bright too often).
+_POOLED_MIN_EXTRA_BINS = {"S_pooled": 0, "S_pooled_strict": 1}
 
-def _resample_pooled_survival(stats: dict, rng: np.random.Generator) -> np.ndarray:
-    """One shot-noise resample of the segment-pooled survival curve.
+
+def _draw_pooled_counts(stats: dict, rng: np.random.Generator) -> np.ndarray:
+    """One multinomial resample of the first-click histogram (per axis and segment)."""
+    counts = np.asarray(stats["pooled_counts"], dtype=np.int64)
+    shape = counts.shape
+    n = counts.sum(axis=-1)                                   # (A, n_seg)
+    P = counts / np.maximum(n, 1)[..., None]
+    return rng.multinomial(n.ravel(), P.reshape(-1, shape[-1])).reshape(shape)
+
+
+def _resample_pooled_survival(
+    stats: dict,
+    rng: np.random.Generator,
+    *,
+    key: str = "S_pooled",
+    draw: np.ndarray | None = None,
+) -> np.ndarray:
+    """One shot-noise resample of a segment-pooled survival curve.
 
     ``stats["pooled_counts"]`` is the ``(n_axes, n_seg, n_seg + 1)``
     first-bright-bin histogram (slot 0 = never bright, slot ``k`` = first
@@ -281,6 +306,12 @@ def _resample_pooled_survival(stats: dict, rng: np.random.Generator) -> np.ndarr
     re-pooling reproduces the joint shot-noise distribution of the whole
     curve — including the correlation between consecutive points, which a
     per-point binomial would drop.
+
+    ``key`` picks the curve: ``"S_pooled"`` (every segment ``L >= i``) or
+    ``"S_pooled_strict"`` (``L > i``).  ``draw`` is a histogram resample
+    already made in this bootstrap iteration (``_draw_pooled_counts``), so
+    both curves of a joint fit come from the same resampled shots; ``None``
+    draws a new one.
 
     The curve is rebuilt on the file's full time axis and then cut by
     ``stats["pooled_mask"]`` (the loader's ``t_max`` / drop mask).  The
@@ -291,15 +322,13 @@ def _resample_pooled_survival(stats: dict, rng: np.random.Generator) -> np.ndarr
     from mpm_analysis.io.experimental.click_record_npz import (
         pooled_survival_from_counts,
     )
-    counts = np.asarray(stats["pooled_counts"], dtype=np.int64)
-    shape = counts.shape
-    n = counts.sum(axis=-1)                                   # (A, n_seg)
-    P = counts / np.maximum(n, 1)[..., None]
-    draw = rng.multinomial(n.ravel(), P.reshape(-1, shape[-1])).reshape(shape)
-    frac, _, n_att = pooled_survival_from_counts(draw)
+    if draw is None:
+        draw = _draw_pooled_counts(stats, rng)
+    frac, _, n_att = pooled_survival_from_counts(
+        draw, min_extra_bins=_POOLED_MIN_EXTRA_BINS[key])
 
     mask = stats.get("pooled_mask")
-    measured = np.asarray(stats["S_pooled"], dtype=float)
+    measured = np.asarray(stats[key], dtype=float)
     if mask is not None:
         mask = np.asarray(mask, dtype=bool)
         frac, n_att = frac[mask], n_att[mask]
@@ -311,12 +340,16 @@ def _resample_pooled_survival(stats: dict, rng: np.random.Generator) -> np.ndarr
         frac[0] = rng.binomial(int(n_att[0]), p0) / max(int(n_att[0]), 1)
     return frac
 
-# Product channels: observable key -> (Bloch field, conditional-count field,
-# survival channel that multiplies it).
+# Tomography channels: observable key -> (Bloch field, conditional-count field,
+# survival channel that multiplies it — None for the raw conditional
+# coordinate, i.e. the loader's "*_cond" keys).
 _POST_SELECTED_TOMOGRAPHY = {
     "X": ("X", "N_X", "SX"),
     "Y": ("Y", "N_Y", "SX"),      # orthogonal phase axis: same experiment as X
     "Z": ("Z", "N_Z", "SZ"),
+    "X_cond": ("X", "N_X", None),
+    "Y_cond": ("Y", "N_Y", None),
+    "Z_cond": ("Z", "N_Z", None),
 }
 
 
@@ -361,7 +394,9 @@ def bootstrap_post_selected_measurements(
     keys:
         Observable keys to reconstruct: survival channels ``"S"``
         (``"survival"``), ``"SX"``, ``"SZ"``; product channels ``"X"``,
-        ``"Y"``, ``"Z"`` — matching the loader extractors.
+        ``"Y"``, ``"Z"``; raw conditional coordinates ``"X_cond"``,
+        ``"Y_cond"``, ``"Z_cond"`` (step 2 alone, no survival factor) —
+        matching the loader extractors.
     rng:
         Numpy random generator.
 
@@ -377,8 +412,13 @@ def bootstrap_post_selected_measurements(
         """Binomial draw of one experiment's survival on its own attempts."""
         if skey in survival_cache:
             return survival_cache[skey]
-        if skey == "S_pooled" and stats.get("pooled_counts") is not None:
-            survival_cache[skey] = _resample_pooled_survival(stats, rng)
+        if skey in _POOLED_MIN_EXTRA_BINS and stats.get("pooled_counts") is not None:
+            # one histogram draw per resample, shared by every pooled curve
+            # of the call (S_pooled and S_pooled_strict are the same shots)
+            if "_pooled_draw" not in survival_cache:
+                survival_cache["_pooled_draw"] = _draw_pooled_counts(stats, rng)
+            survival_cache[skey] = _resample_pooled_survival(
+                stats, rng, key=skey, draw=survival_cache["_pooled_draw"])
             return survival_cache[skey]
         frac_field, n_field = _POST_SELECTED_SURVIVAL[skey]
         if stats.get(frac_field) is None or stats.get(n_field) is None:
@@ -401,10 +441,14 @@ def bootstrap_post_selected_measurements(
         return survival_cache[skey]
 
     def _tomo(key: str) -> np.ndarray:
-        """Binomial draw of a conditional Bloch coordinate in [-1, 1]."""
-        if key in tomo_cache:
-            return tomo_cache[key]
+        """Binomial draw of a conditional Bloch coordinate in [-1, 1].
+
+        Cached by the Bloch field, so ``"X"`` and ``"X_cond"`` in one call
+        share the same <X>* draw (same experiment, same survivors).
+        """
         val_field, n_field, _ = _POST_SELECTED_TOMOGRAPHY[key]
+        if val_field in tomo_cache:
+            return tomo_cache[val_field]
         missing = [f for f in (val_field, n_field) if stats.get(f) is None]
         if missing:
             raise KeyError(
@@ -418,8 +462,8 @@ def bootstrap_post_selected_measurements(
         q = (1.0 + v) / 2.0
         n_plus = rng.binomial(np.where(safe, n, 1), q)
         v_boot = 2.0 * n_plus / np.where(safe, n, 1) - 1.0
-        tomo_cache[key] = np.where(safe, v_boot, v)  # no shots → keep measured
-        return tomo_cache[key]
+        tomo_cache[val_field] = np.where(safe, v_boot, v)  # no shots → keep measured
+        return tomo_cache[val_field]
 
     rows = []
     for key in keys:
@@ -433,6 +477,10 @@ def bootstrap_post_selected_measurements(
                 f"{', '.join(sorted(set(_POST_SELECTED_SURVIVAL) | set(_POST_SELECTED_TOMOGRAPHY)))})."
             )
         _, _, skey = _POST_SELECTED_TOMOGRAPHY[key]
+        if skey is None:
+            # Raw conditional coordinate ("X_cond" …): the Bloch draw alone.
+            rows.append(_tomo(key))
+            continue
         # The product carries its OWN experiment's survival, and the draws are
         # cached: the same SX* multiplies the X product and is returned for a
         # standalone "SX" channel, so their correlation is preserved.
@@ -440,9 +488,50 @@ def bootstrap_post_selected_measurements(
     return np.vstack(rows)
 
 
+def bootstrap_errorbar_measurements(
+    stats: dict,
+    keys: list[str],
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """One Gaussian resample of the traces from their measured error bars.
+
+    Every point is drawn independently as ``mean + sigma · N(0, 1)`` with
+    the measured value and its per-point 1-sigma error bar
+    (``record.sigma`` — e.g. the block standard errors
+    ``run_pooled_p0.py`` writes from the raw NPZ).  Points whose sigma is
+    0 or not finite stay at the measured value (the t = 0 anchor).  The
+    draws are NOT clipped to [0, 1]: the Gaussian is the model.
+
+    Parameters
+    ----------
+    stats:
+        ``{"mean": (k, N), "sigma": (k, N)}`` as assembled by
+        :func:`run_data_bootstrap` (``resampler="errorbar"``), rows ordered
+        like ``keys``.
+    keys:
+        Observable keys (only their number is checked — the rows already
+        carry the observables in this order).
+
+    Returns
+    -------
+    np.ndarray
+        Resampled observables, shape ``(len(keys), N)``.
+    """
+    mean = np.atleast_2d(np.asarray(stats["mean"], dtype=float))
+    sigma = np.atleast_2d(np.asarray(stats["sigma"], dtype=float))
+    if mean.shape[0] != len(keys) or sigma.shape != mean.shape:
+        raise ValueError(
+            f"bootstrap_errorbar_measurements: mean {mean.shape} / sigma "
+            f"{sigma.shape} do not match {len(keys)} observables."
+        )
+    sigma = np.where(np.isfinite(sigma), sigma, 0.0)
+    return mean + sigma * rng.standard_normal(mean.shape)
+
+
 _MEASUREMENT_RESAMPLERS = {
     "ens_avg": bootstrap_ens_avg_measurements,
     "post_selected": bootstrap_post_selected_measurements,
+    "errorbar": bootstrap_errorbar_measurements,
 }
 
 
@@ -451,12 +540,15 @@ def _data_bootstrap_worker(payload: dict) -> tuple:
 
     Per draw: resample measurement statistics → reconstruct observables →
     stacked common-pole MPM → nonlinear LSQ refinement (when configured) →
-    Hungarian match to the clean poles → poles + quadratic parameters.
+    canonical slot order → poles + quadratic parameters.  A draw whose pole
+    set contains a Nyquist-aliased pole (``Im = π/dt``, a sampling artefact)
+    is left NaN and counted in ``n_aliased``, so it never enters the error
+    bars.
 
-    Returns ``(boot_real, boot_imag, boot_params, failure)`` where ``failure``
-    is ``None`` or ``(n_failed, first_error)`` — never swallow errors
-    silently, or a systematically broken bootstrap looks like a valid
-    all-NaN result.
+    Returns ``(boot_real, boot_imag, boot_params, failure, n_aliased)``
+    where ``failure`` is ``None`` or ``(n_failed, first_error)`` — never
+    swallow errors silently, or a systematically broken bootstrap looks like
+    a valid all-NaN result.
     """
     from mpm_analysis.analysis.matrix_pencil import (
         matrix_pencil_method,
@@ -479,28 +571,26 @@ def _data_bootstrap_worker(payload: dict) -> tuple:
 
     clean = payload["clean_poles"]
     pencil = payload.get("pencil", True)
+    dt = float(np.mean(np.diff(t)))
     if pencil:
-        # Clean fit: only to pin the pencil parameter and (as fallback) the
-        # Hungarian reference.  The central result is NOT recomputed here.
+        # Clean fit: only to pin the pencil parameter.  The central result
+        # is NOT recomputed here.
         try:
-            poles_ref, _, L_fit = matrix_pencil_method(t, payload["Y"], order,
-                                                       L=payload["L"])
-            poles_ref = sort_poles_canonical(poles_ref)
+            _, _, L_fit = matrix_pencil_method(t, payload["Y"], order,
+                                               L=payload["L"])
         except Exception as exc:
             return (boot_real, boot_imag, boot_params,
-                    (n_boot, f"clean fit failed: {type(exc).__name__}: {exc}"))
-        if clean is not None and np.all(np.isfinite(clean)):
-            poles_ref = np.asarray(clean, dtype=complex)
+                    (n_boot, f"clean fit failed: {type(exc).__name__}: {exc}"), 0)
     else:
         # Refine-only draws (non-uniform time axis): every draw starts from
         # the clean poles and the pencil is never run.
         if clean is None or not np.all(np.isfinite(clean)):
             return (boot_real, boot_imag, boot_params,
-                    (n_boot, "refine-only bootstrap needs finite clean poles"))
+                    (n_boot, "refine-only bootstrap needs finite clean poles"), 0)
         poles_ref = np.asarray(clean, dtype=complex)
 
     single = payload["single"]
-    n_failed = 0
+    n_failed = n_aliased = 0
     first_error: str | None = None
     for b in range(n_boot):
         try:
@@ -519,7 +609,11 @@ def _data_bootstrap_worker(payload: dict) -> tuple:
                     bounds_real=refine_settings["bounds_real"],
                     bounds_imag=refine_settings["bounds_imag"],
                 )
-            poles_b = match_poles_hungarian(poles_b, poles_ref)
+            # Same canonical slot order as the measured fit (pole_sorting).
+            poles_b = sort_poles_canonical(poles_b)
+            if aliased_pole_mask(poles_b, dt).any():
+                n_aliased += 1          # Nyquist artefact: row stays NaN
+                continue
             boot_real[b] = poles_b.real
             boot_imag[b] = poles_b.imag
             if np.all(np.isfinite(poles_b)):
@@ -529,7 +623,7 @@ def _data_bootstrap_worker(payload: dict) -> tuple:
             if first_error is None:
                 first_error = f"{type(exc).__name__}: {exc}"
     failure = (n_failed, first_error) if n_failed else None
-    return boot_real, boot_imag, boot_params, failure
+    return boot_real, boot_imag, boot_params, failure, n_aliased
 
 
 def run_data_bootstrap(
@@ -545,6 +639,7 @@ def run_data_bootstrap(
     refine_settings: dict | None = None,
     n_jobs: int = -1,
     pencil: bool = True,
+    resampler: str = "counts",
 ) -> list[_LambdaBootstrapResult]:
     """Data-resampling bootstrap: resample the measurement statistics.
 
@@ -570,8 +665,9 @@ def run_data_bootstrap(
         are spawned from ``np.random.SeedSequence(seed)``.  ``None`` → truly
         random.
     clean_poles:
-        Per-slice clean poles (``state["poles_raw"]``) used as the Hungarian
-        branch reference; the central result is never altered.
+        Per-slice clean poles (``state["poles_raw"]``); only the start point
+        of refine-only draws (``pencil=False``) — the central result is never
+        altered, and draws are slot-ordered canonically, not matched to it.
     refine_settings:
         ``{"conjugate_pairs", "bounds_real", "bounds_imag"}`` from the
         ``RefineStep`` configuration; ``None`` → per-draw MPM only.
@@ -586,6 +682,13 @@ def run_data_bootstrap(
         :func:`mpm_analysis.analysis.dead_time.compress_records`), since the
         pencil assumes equal spacing.  Requires ``clean_poles`` and
         ``refine_settings``.
+    resampler:
+        ``"counts"`` (default): resample the raw counting statistics in
+        ``record.metadata["bootstrap_stats"]`` (multinomial / binomial, as
+        above).  ``"errorbar"``: draw every point of every trace as
+        ``mean + sigma · N(0, 1)`` from its measured per-point error bar
+        ``record.sigma`` (see :func:`bootstrap_errorbar_measurements`);
+        lambdas whose records carry no sigma are an error.
 
     Returns
     -------
@@ -594,6 +697,9 @@ def run_data_bootstrap(
     """
     from mpm_analysis.data_types.observables import group_records_by_lambda
 
+    if resampler not in ("counts", "errorbar"):
+        raise ValueError(f"run_data_bootstrap: unknown resampler '{resampler}' "
+                         "(expected 'counts' or 'errorbar').")
     if not pencil and (clean_poles is None or refine_settings is None):
         raise ValueError(
             "run_data_bootstrap(pencil=False) refines every draw from the "
@@ -621,7 +727,18 @@ def run_data_bootstrap(
         )
         groups = [(r.lambda_val, r.t, r.signal, [r]) for r in slices]
 
-    if not any(recs[0].metadata.get("bootstrap_stats") for *_x, recs in groups):
+    if resampler == "errorbar":
+        no_sigma = [f"{lam:.3f}" for lam, _t, _y, recs in groups
+                    if any(r.sigma is None for r in recs)]
+        if no_sigma:
+            raise ValueError(
+                "run_data_bootstrap(resampler='errorbar'): no per-point error "
+                f"bars (record.sigma) for lam = {', '.join(no_sigma)}.  The "
+                "post_selected loader reads them from data.p_0_t_errorbar_meta "
+                "— write them with raw_data_tests/run_pooled_p0.py "
+                "(WRITE_ERRORBARS = True), or use 'data_bootstrap'."
+            )
+    elif not any(recs[0].metadata.get("bootstrap_stats") for *_x, recs in groups):
         raise ValueError(
             "run_data_bootstrap: no record carries metadata['bootstrap_stats'] "
             "— this loader/data mode does not provide measurement statistics. "
@@ -632,7 +749,14 @@ def run_data_bootstrap(
 
     payloads = []
     for i, (lam, t, y, recs) in enumerate(groups):
-        stats = recs[0].metadata.get("bootstrap_stats")
+        if resampler == "errorbar":
+            stats = {
+                "data_mode": "errorbar",
+                "mean": np.atleast_2d(np.asarray(y, dtype=float)),
+                "sigma": np.vstack([np.asarray(r.sigma, dtype=float) for r in recs]),
+            }
+        else:
+            stats = recs[0].metadata.get("bootstrap_stats")
         N = np.atleast_2d(y).shape[1]
         L_i = L
         if L_used is not None and i < len(L_used):
@@ -653,7 +777,7 @@ def run_data_bootstrap(
         return (np.full((n_boot, order), np.nan),
                 np.full((n_boot, order), np.nan),
                 np.full((n_boot, order), np.nan),
-                None)
+                None, 0)
 
     missing = [p["lambda_val"] for p in payloads if p["stats"] is None]
     for lam in missing:
@@ -687,9 +811,12 @@ def run_data_bootstrap(
     results: list[_LambdaBootstrapResult] = []
     total_failed = 0
     first_error: str | None = None
+    aliased_report = []
     for p in payloads:
-        br, bi, bp, failure = (next(out_iter) if p["stats"] is not None
-                               else _empty())
+        br, bi, bp, failure, n_aliased = (next(out_iter) if p["stats"] is not None
+                                          else _empty())
+        if n_aliased:
+            aliased_report.append(f"{p['lambda_val']:.3f}: {n_aliased}")
         if failure is not None:
             n_failed, err = failure
             total_failed += n_failed
@@ -704,6 +831,9 @@ def run_data_bootstrap(
         ))
 
     n_total = n_boot * max(len(todo), 1)
+    if aliased_report:
+        print("  Bootstrap: draws with a Nyquist-aliased pole dropped from the "
+              "error bars (lam: n) — " + ", ".join(aliased_report))
     if total_failed:
         print(f"Warning: {total_failed}/{n_total} bootstrap draws failed "
               f"({total_failed / n_total:.1%}); first error: {first_error}")
@@ -719,6 +849,72 @@ def run_data_bootstrap(
 # Aggregation
 # ---------------------------------------------------------------------------
 
+def _split_pair(p: np.ndarray, tol: float = 1e-9) -> tuple[np.ndarray, int]:
+    """Indices of the EP pair and of the steady pole in one order-3 pole set.
+
+    The pair is the conjugate pair when there is one; with three real poles
+    the steady pole is the one closest to 0 and the pair is the other two.
+    """
+    im = np.abs(p.imag) > tol
+    if im.sum() >= 2:
+        pair = np.flatnonzero(im)[:2]
+    else:
+        steady = int(np.argmin(np.abs(p.real)))
+        pair = np.array([k for k in range(3) if k != steady])
+    steady = int([k for k in range(3) if k not in pair][0])
+    return pair, steady
+
+
+def _draws_center(draws: np.ndarray, measured: np.ndarray | None):
+    """Centre and 1-sigma of bootstrap pole draws, continuous through the EP.
+
+    A slot-wise mean of the draws is wrong near an exceptional point: draws
+    on one side carry a conjugate pair (equal real parts, ±ω), draws on the
+    other side two real poles, and averaging them slot by slot gives split
+    real parts together with a non-zero frequency — a pole set no draw has.
+    The pair is therefore averaged through its symmetric functions, which
+    are continuous across the EP: ``sum = s1 + s2`` and ``prod = s1·s2``,
+    both real for a conjugate pair or two real poles.  The centre pair is
+    the root pair of ``s² − mean(sum)·s + mean(prod)``; the steady pole is
+    the plain mean.  The 1-sigma is the std of the draws' pair roots (sorted
+    by Im, then Re) and of the steady pole.  Slots follow ``measured`` (the
+    fit of the original data) when given, so strands keep their labels.
+    Orders other than 3 fall back to the slot-wise mean ± std.
+    """
+    n, order = draws.shape
+    if order != 3:
+        return draws.mean(axis=0), (draws.real.std(axis=0, ddof=1) if n > 1 else np.zeros(order),
+                                    draws.imag.std(axis=0, ddof=1) if n > 1 else np.zeros(order))
+    sums, prods, steadies, pairs = [], [], [], []
+    for p in draws:
+        pair, steady = _split_pair(p)
+        s1, s2 = p[pair]
+        sums.append((s1 + s2).real); prods.append((s1 * s2).real); steadies.append(p[steady])
+        pr = sorted(p[pair], key=lambda z: (-z.imag, -z.real))
+        pairs.append(pr)
+    S, P = float(np.mean(sums)), float(np.mean(prods))
+    disc = S * S - 4.0 * P
+    root = np.sqrt(complex(disc))
+    r1, r2 = (S + root) / 2, (S - root) / 2                 # conjugate pair if disc < 0
+    pair_c = sorted([r1, r2], key=lambda z: (-z.imag, -z.real))
+    steady_c = complex(np.mean(steadies))
+    pairs = np.array(pairs); steadies = np.array(steadies)
+    sd = lambda a: (a.std(axis=0, ddof=1) if n > 1 else np.zeros(a.shape[1:]))
+    if measured is not None and np.all(np.isfinite(measured)):
+        mp, ms = _split_pair(np.asarray(measured, complex))
+        mpair_order = sorted(range(2), key=lambda k: (-measured[mp[k]].imag, -measured[mp[k]].real))
+        slots_pair = [mp[k] for k in mpair_order]; slot_steady = ms
+    else:
+        slots_pair, slot_steady = [0, 1], 2
+    centre = np.zeros(3, complex); lo_r = np.zeros(3); lo_i = np.zeros(3)
+    for k, slot in enumerate(slots_pair):
+        centre[slot] = pair_c[k]
+        lo_r[slot] = sd(pairs.real)[k]; lo_i[slot] = sd(pairs.imag)[k]
+    centre[slot_steady] = steady_c
+    lo_r[slot_steady] = sd(steadies.real); lo_i[slot_steady] = sd(steadies.imag)
+    return centre, (lo_r, lo_i)
+
+
 def aggregate_bootstrap(
     boot_results: list[_LambdaBootstrapResult],
     *,
@@ -726,8 +922,18 @@ def aggregate_bootstrap(
     percentile_hi: float = 84.0,
     observable_key: str = "survival",
     center_poles: "list[np.ndarray] | None" = None,
+    center: str = "measured",
 ) -> PolesResult:
     """Aggregate bootstrap distributions into a ``PolesResult``.
+
+    ``center="measured"`` (default): the central poles are the fit of the
+    original dataset (``center_poles``) and the 16/84 percentiles of the
+    draws set the asymmetric uncertainty around them.
+    ``center="draws"``: the central poles are the MEAN of the draws and the
+    uncertainty is their standard deviation (symmetric), i.e. the plain
+    statistics of the bootstrap distribution — the natural choice when every
+    draw is a sample of the data from its measured error bars
+    (``errorbar`` mode), so that the measured curve is just one more sample.
 
     Parameters
     ----------
@@ -755,6 +961,11 @@ def aggregate_bootstrap(
     freq_lo   = np.zeros((n_lam, order))
     freq_hi   = np.zeros((n_lam, order))
 
+    if center not in ("measured", "draws"):
+        raise ValueError(f"aggregate_bootstrap: center must be 'measured' or 'draws', got {center!r}.")
+    if center == "draws":
+        center_poles = None
+
     def _center(i) -> np.ndarray | None:
         if center_poles is None or i >= len(center_poles):
             return None
@@ -762,6 +973,12 @@ def aggregate_bootstrap(
         return c if np.all(np.isfinite(c)) else None
 
     for i, br in enumerate(boot_results):
+        c = _center(i)
+        if len(br.boot_real) == 0 and c is not None:
+            # n_boot = 0: no draws were made — the measured fit, zero error bars
+            decay_med[i], freq_med[i] = -c.real, c.imag
+            continue
+
         valid_real = br.boot_real[~np.isnan(br.boot_real).any(axis=1)]
         valid_imag = br.boot_imag[~np.isnan(br.boot_imag).any(axis=1)]
 
@@ -770,9 +987,14 @@ def aggregate_bootstrap(
             freq_med[i]  = freq_lo[i]  = freq_hi[i]  = np.nan
             continue
 
-        c = _center(i)
         # Decay rates: -Re(pole)  (positive = decaying)
         dr = -valid_real
+        if center == "draws":           # statistics of the bootstrap distribution
+            poles_c, (lo_r, lo_i) = _draws_center(valid_real + 1j * valid_imag, c)
+            decay_med[i], freq_med[i] = -poles_c.real, poles_c.imag
+            decay_lo[i] = decay_hi[i] = lo_r
+            freq_lo[i] = freq_hi[i] = lo_i
+            continue
         decay_med[i] = (-c.real) if c is not None else np.median(dr, axis=0)
         decay_lo[i]  = decay_med[i] - np.percentile(dr, percentile_lo, axis=0)
         decay_hi[i]  = np.percentile(dr, percentile_hi, axis=0) - decay_med[i]
@@ -789,28 +1011,37 @@ def aggregate_bootstrap(
     if center_poles is not None:
         for i in range(n_lam):
             c = _center(i)
-            if c is not None and len(c) >= 2 and np.isfinite(rs_med[i]):
-                rs_c = np.abs(c[1].real - c[0].real) / 2.0
-                is_c = np.abs(c[1].imag - c[0].imag) / 2.0
+            if c is None or len(c) < 2:
+                continue
+            rs_c = np.abs(c[1].real - c[0].real) / 2.0
+            is_c = np.abs(c[1].imag - c[0].imag) / 2.0
+            if len(boot_results[i].boot_real) == 0:     # n_boot = 0
+                rs_med[i], is_med[i] = rs_c, is_c
+                rs_lo[i] = rs_hi[i] = is_lo[i] = is_hi[i] = 0.0
+            elif np.isfinite(rs_med[i]):
                 # Re-center half-widths: lo = c − p16, hi = p84 − c
                 rs_lo[i] -= rs_med[i] - rs_c; rs_hi[i] += rs_med[i] - rs_c
                 is_lo[i] -= is_med[i] - is_c; is_hi[i] += is_med[i] - is_c
                 rs_med[i], is_med[i] = rs_c, is_c
 
-    # Raw samples container: (n_lam, n_boot, order) complex
-    lambda_values = np.array([br.lambda_val for br in boot_results])
-    raw_samples_arr = np.stack(
-        [br.boot_real + 1j * br.boot_imag for br in boot_results], axis=0
-    )
-    param_samples = None
-    if all(br.boot_params is not None for br in boot_results) and boot_results:
-        param_samples = np.stack([br.boot_params for br in boot_results], axis=0)
-    raw_samples = PoleSamples(
-        samples=raw_samples_arr,
-        observable_key=observable_key,
-        lambda_values=lambda_values,
-        param_samples=param_samples,
-    )
+    # Raw samples container: (n_lam, n_boot, order) complex; None without
+    # draws (n_boot = 0) — the downstream per-draw steps then skip their
+    # error bars.
+    raw_samples = None
+    if boot_results and len(boot_results[0].boot_real):
+        lambda_values = np.array([br.lambda_val for br in boot_results])
+        raw_samples_arr = np.stack(
+            [br.boot_real + 1j * br.boot_imag for br in boot_results], axis=0
+        )
+        param_samples = None
+        if all(br.boot_params is not None for br in boot_results):
+            param_samples = np.stack([br.boot_params for br in boot_results], axis=0)
+        raw_samples = PoleSamples(
+            samples=raw_samples_arr,
+            observable_key=observable_key,
+            lambda_values=lambda_values,
+            param_samples=param_samples,
+        )
 
     return PolesResult(
         decay_rates=decay_med,

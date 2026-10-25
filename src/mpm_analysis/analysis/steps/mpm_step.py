@@ -76,7 +76,7 @@ class MPMStep(AnalysisStep):
         from mpm_analysis.analysis.pole_sorting import (
             sort_poles_canonical,
             enforce_pole_count,
-            track_branches_across_lambda,
+            aliased_pole_mask,
         )
         from mpm_analysis.data_types.observables import group_records_by_lambda
 
@@ -112,11 +112,22 @@ class MPMStep(AnalysisStep):
         lambdas = []
         sv_list = []
 
+        aliased_lams = []
         for lam, t, Y, _recs in groups:
             try:
                 poles, sv, L_u = matrix_pencil_method(t, Y, self.order, L=self.L)
                 poles = sort_poles_canonical(enforce_pole_count(poles, self.order))
-                amps = solve_linear_amplitudes(t, Y, poles)
+                dt = float(np.mean(np.diff(t)))
+                if aliased_pole_mask(poles, dt).any():
+                    # A pole at the Nyquist frequency of the grid is a
+                    # sampling artefact: this pole set is dropped and the
+                    # bootstrap's (artefact-free) median stands in for it.
+                    aliased_lams.append(lam)
+                    poles = np.full(self.order, np.nan, dtype=complex)
+                    amp_shape = self.order if len(keys) == 1 else (len(keys), self.order)
+                    amps = np.full(amp_shape, np.nan, dtype=complex)
+                else:
+                    amps = solve_linear_amplitudes(t, Y, poles)
                 poles_raw.append(poles)
                 amplitudes_raw.append(amps)
                 L_used.append(L_u)
@@ -159,13 +170,14 @@ class MPMStep(AnalysisStep):
                 else:
                     plt.close(fig)      # headless: the figure is already saved
 
-        # Branch tracking: Hungarian-match each slice's poles to the previous
-        # slice so index i follows one continuous branch across lambda (no
-        # label switching near the EP).  Amplitudes are permuted alongside.
-        poles_raw, perms = track_branches_across_lambda(poles_raw, return_indices=True)
-        amplitudes_raw = [
-            amps[..., idx] for amps, idx in zip(amplitudes_raw, perms)
-        ]
+        # Slot order is the per-λ canonical order (pole_sorting): slots 0, 1
+        # are the EP pair on both sides of the EP, slot 2 the slow pole.  No
+        # cross-λ matching — that swapped labels where the pair coalesces.
+        if aliased_lams:
+            print(f"  MPMStep: {len(aliased_lams)} pole set(s) at the Nyquist "
+                  f"frequency dropped (lam = "
+                  + ", ".join(f"{l:.3f}" for l in aliased_lams)
+                  + "); central values there = bootstrap median.")
 
         state["poles_raw"] = poles_raw
         state["amplitudes_raw"] = amplitudes_raw

@@ -293,17 +293,27 @@ def augment_json_with_ksi(
     ksi_result,
     *,
     overwrite: bool = True,
+    block: str = "ksi_crossing",
 ) -> Path:
-    """Add / update the ``ksi_crossing`` block in an existing JSON.
+    """Add / update a ξ (state-freezing) block in an existing JSON.
 
     Parameters
     ----------
     path:
         Path to an existing ``mpm_analysis_results_*.json``.
     ksi_result:
-        A ``KsiCrossingResult`` from ``KsiCrossingPipeline.run()``.
+        A ``KsiCrossingResult`` from ``KsiCrossingPipeline.run()`` (ξ from
+        the pencil poles) or a ``SpiralKsiResult`` from
+        ``SpiralKsiPipeline.run()`` (ξ from the direct spiral fit).  Both
+        share the ``lambda_values / ksi_values / zero_crossings / ksi_lower /
+        ksi_upper / crossing_samples / crossing_quantiles`` attributes; the
+        extra per-route fields listed in ``_KSI_EXTRA_FIELDS`` are written
+        when present.
     overwrite:
         If ``False`` and the key already exists, raise ``ValueError``.
+    block:
+        JSON key of the block: ``"ksi_crossing"`` (pole route, default) or
+        ``"ksi_spiral"`` (spiral route), so the two never overwrite each other.
 
     Returns
     -------
@@ -312,9 +322,9 @@ def augment_json_with_ksi(
     """
     path = Path(path)
     jd = _load_json(path)
-    if "ksi_crossing" in jd and not overwrite:
+    if block in jd and not overwrite:
         raise ValueError(
-            f"'ksi_crossing' already present in {path.name}. "
+            f"'{block}' already present in {path.name}. "
             "Pass overwrite=True to replace it."
         )
 
@@ -323,10 +333,8 @@ def augment_json_with_ksi(
     if cs is not None and len(cs):
         frac_none = float(np.mean(np.isnan(cs)))
 
-    jd["ksi_crossing"] = {
+    entry = {
         "timestamp": datetime.now(tz=timezone.utc).isoformat(),
-        "pole_idx1": ksi_result.pole_idx1,
-        "pole_idx2": ksi_result.pole_idx2,
         "lambda_values": _to_list(ksi_result.lambda_values),
         "ksi_values": _to_list(ksi_result.ksi_values),
         "ksi_lower": _to_list(ksi_result.ksi_lower),
@@ -339,13 +347,28 @@ def augment_json_with_ksi(
         ),
         "fraction_no_crossing": frac_none,
     }
+    for name in _KSI_EXTRA_FIELDS:
+        if hasattr(ksi_result, name):
+            v = getattr(ksi_result, name)
+            entry[name] = _to_list(v) if isinstance(v, np.ndarray) else v
+    jd[block] = entry
     _save_json(jd, path)
     lam_ksi = (ksi_result.crossing_quantiles[1]
                if ksi_result.crossing_quantiles is not None
                else ksi_result.lambda_ksi_zero)
-    print(f"Augmented {path.name} with the ksi (state-freezing) crossing"
+    print(f"Augmented {path.name} with the '{block}' (state-freezing) crossing"
           + (f" (lam(ksi=0) = {lam_ksi:.4f})" if lam_ksi is not None else ""))
     return path
+
+
+# Per-route scalar / array attributes of a ξ result that the block records
+# when the result object carries them (pole route: the slot indices; spiral
+# route: the fitted rates and the fit settings).
+_KSI_EXTRA_FIELDS = (
+    "pole_idx1", "pole_idx2",
+    "gamma0_source", "crossing_method", "t_fit_min", "min_survival",
+    "gamma_a", "gamma_a_err", "gamma0", "gamma0_err", "omega", "r_inf",
+)
 
 
 def augment_json_with_transitions(

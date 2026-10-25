@@ -134,6 +134,9 @@ def fit_sqrt_to_eigenvalues(
     hi = min(len(lambdas), c_idx + window_right + 1)
     mask = np.zeros(len(lambdas), dtype=bool)
     mask[lo:hi] = True
+    # λ points whose pair splitting is NaN (no pencil solution / Nyquist-
+    # dropped draws) cannot enter curve_fit — leave them out of the window.
+    mask &= np.isfinite(imag_split) & np.isfinite(real_split)
 
     lam_w      = lambdas[mask]
     is_w       = imag_split[mask]
@@ -330,28 +333,31 @@ def fit_sqrt_per_realization(
     p0 = [1.0, 0.0, float(np.clip(lambda_c_guess, lc_lo, lc_hi))]
     bounds = ([-1e3, -1e3, lc_lo], [1e3, 1e3, lc_hi])
 
-    if fit_real_part:
-        sigma_fit = np.hstack([rs_sig[sl], is_sig[sl]])
-    else:
+    if not fit_real_part:
         def _imag_model(lam_, a, b, lambda_c):
             neg = np.clip(lambda_c - lam_, 0.0, None)
             return a * np.sqrt(neg) + b * neg ** 1.5
-        sigma_fit = is_sig[sl]
 
     lam_c_samples = np.full(n_boot, np.nan)
     for b in range(n_boot):
+        # A λ whose draw was dropped (failed / Nyquist-aliased pole set) is
+        # simply missing from this realization: fit the finite λ only.
         if fit_real_part:
-            y_fit = np.hstack([rs_all[sl, b], is_all[sl, b]])
+            ok = np.isfinite(rs_all[sl, b]) & np.isfinite(is_all[sl, b])
+            y_fit = np.hstack([rs_all[sl, b][ok], is_all[sl, b][ok]])
+            sig_b = np.hstack([rs_sig[sl][ok], is_sig[sl][ok]])
             model = _joint_model
         else:
-            y_fit = is_all[sl, b]
+            ok = np.isfinite(is_all[sl, b])
+            y_fit = is_all[sl, b][ok]
+            sig_b = is_sig[sl][ok]
             model = _imag_model
-        if not np.all(np.isfinite(y_fit)) or len(lam_w) < 4:
+        if ok.sum() < 4:
             continue
         try:
             popt, _ = curve_fit(
-                model, lam_w, y_fit,
-                p0=p0, sigma=sigma_fit,
+                model, lam_w[ok], y_fit,
+                p0=p0, sigma=sig_b,
                 absolute_sigma=False, bounds=bounds, max_nfev=max_nfev,
             )
             lam_c_samples[b] = popt[2]

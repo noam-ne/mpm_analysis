@@ -335,6 +335,28 @@ def _resolve_lambda(loader, jd: dict, fp: Path) -> float:
 # Post-selected loader
 # ---------------------------------------------------------------------------
 
+def _navg(jd: dict) -> int:
+    """Repetitions per axis setting of THIS file (merged folders mix runs)."""
+    params = jd.get("parameters", {})
+    navg = (params.get("actual_navg_repeat_experiment")
+            or params.get("navg_repeat_experiment"))
+    if not navg:
+        raise KeyError("navg_repeat_experiment missing from parameters — the "
+                       "tomography channels cannot be normalised.")
+    return int(navg)
+
+
+def _z_survival(jd: dict) -> np.ndarray:
+    """Survival of the z-axis tomography run: survivors of z/-z over 2·navg attempts."""
+    return np.asarray(jd["data"]["z_axis_number_of_measurements"], dtype=float) / (2 * _navg(jd))
+
+
+def _phase_survival(jd: dict) -> np.ndarray:
+    """Survival of the phase-axis run: survivors per phase axis pair over 2·navg attempts."""
+    return (np.asarray(jd["data"]["phase_axes_number_of_measurements"], dtype=float)
+            / (2 * _navg(jd)))
+
+
 class PostSelectedLoader(ExperimentalLoader):
     """Load post-selected tomography survival-probability data.
 
@@ -350,14 +372,23 @@ class PostSelectedLoader(ExperimentalLoader):
         file's drive instead (:func:`_drive_gamma_ups`).
 
     Default observables registered:
-        ``"survival"``      <- ``data.p_0_t_array``
-        ``"Z"``             <- ``data.s_z``  (NaN if absent)
-        ``"G_probability"`` <- ``data.G_probability``  (NaN if absent)
-        ``"B_probability"`` <- ``data.B_probability``  (NaN if absent)
-        ``"D_probability"`` <- ``data.D_probability``  (NaN if absent)
+        ``"S"``             <- ``data.p_0_t_array``  (dedicated survival run)
         ``"S_prev_click"``  <- ``data.p_0_t_array_prev_click``
         ``"S_prev_noclick"``<- ``data.p_0_t_array_prev_noclick``
         ``"S_pooled"``      <- ``data.p_0_t_array_pooled``
+        ``"S_pooled_strict"`` <- ``data.p_0_t_array_pooled_strict`` (no
+                               segment's own last bin; one point shorter)
+        ``"SZ"`` / ``"SX"`` <- survival of the z / phase tomography runs
+        ``"Z"``, ``"X"``, ``"Y"``  <- SZ·<Z>, SX·<X>, SX·<Y>  (unnormalised
+                               Bloch components — the 3x3-generator variables
+                               the joint pencil fits)
+        ``"Z_cond"``, ``"X_cond"``, ``"Y_cond"`` <- the raw conditional Bloch
+                               coordinates <Z>, <X>, <Y> on the surviving
+                               trajectories (``z_axis_array``,
+                               ``main_phase_axis_array``,
+                               ``orthogonal_phase_axis_array``) — the spiral
+                               trajectory R(t) = (X, Z) of the state-freezing
+                               approach-rate fit (analysis/spiral_approach.py)
 
     The conditional pair are the raw-record survivals conditioned on the
     preceding segment's outcome, written into the scan JSONs by
@@ -376,6 +407,13 @@ class PostSelectedLoader(ExperimentalLoader):
     bootstrap resamples that histogram multinomially (one draw per axis and
     segment), which keeps the correlation between pooled points that share
     shots.
+
+    ``S_pooled_strict`` pools only the segments that run PAST ``t_i``
+    (``L > i``), so no point contains a segment's own last bin — the bin
+    the cavity ring-down reads bright too often (scans 3-5).  Its last point
+    has no such segment and is stored as ``null``; the loader trims that
+    trailing undefined sample, so the record ends one bin earlier.  Same
+    histogram, same multinomial bootstrap (``min_extra_bins = 1``).
     """
 
     def __init__(self, csv_path: str | Path | bool | None = "auto") -> None:
@@ -412,29 +450,74 @@ class PostSelectedLoader(ExperimentalLoader):
             lambda jd, t: np.asarray(
                 jd["data"]["p_0_t_array_pooled"], dtype=float),
         )
+        # Same pool without each segment's own last bin; the stored last
+        # point is null (-> NaN), which load() trims off the record end.
+        self.add_extractor(
+            "S_pooled_strict",
+            lambda jd, t: np.asarray(
+                jd["data"]["p_0_t_array_pooled_strict"], dtype=float),
+        )
+        # Tomography channels.  The scan stores the survivor COUNTS per axis
+        # pair (z: z/-z, phase: x/-x and y/-y) and the conditional Bloch
+        # coordinates on those survivors.  Each axis pair is measured navg
+        # times per setting, i.e. navg*2 attempts, so
+        #   SZ = N_z / (2 navg),   SX = N_phase / (2 navg)
+        # are that experiment's own survival and  Z = SZ·<Z>, X = SX·<X>,
+        # Y = SX·<Y>  the unnormalised Bloch components p<Z>, p<X>, p<Y> —
+        # the variables of the 3x3 generator.  navg comes from each file
+        # (merged folders hold files of different runs), never a constant.
+        self.add_extractor("SZ", lambda jd, t: _z_survival(jd))
+        self.add_extractor("SX", lambda jd, t: _phase_survival(jd))
         self.add_extractor(
             "Z",
-            lambda jd, t: np.asarray(jd["data"]["z_axis_array"], dtype=float)
-            * np.asarray(jd["data"]["z_axis_number_of_measurements"], dtype=float)/60000,
+            lambda jd, t: np.asarray(jd["data"]["z_axis_array"], dtype=float) * _z_survival(jd),
         )
         self.add_extractor(
             "X",
-            lambda jd, t: np.asarray(jd["data"]["main_phase_axis_array"], dtype=float)
-            * np.asarray(jd["data"]["phase_axes_number_of_measurements"], dtype=float)/60000,
+            lambda jd, t: np.asarray(jd["data"]["main_phase_axis_array"], dtype=float) * _phase_survival(jd),
         )
         self.add_extractor(
-                    "SX",
-                    lambda jd, t: np.asarray(jd["data"]["phase_axes_number_of_measurements"], dtype=float)/60000,
-                )
+            "Y",
+            lambda jd, t: np.asarray(jd["data"]["orthogonal_phase_axis_array"], dtype=float)
+            * _phase_survival(jd),
+        )
+        # Raw conditional Bloch coordinates on the survivors (no survival
+        # factor): the trajectory R(t) = (X, Z) whose late-time approach to
+        # the fixed point gives gamma_a (analysis/spiral_approach.py).  The
+        # data bootstrap resamples them binomially on N_X / N_Z alone.
         self.add_extractor(
-                            "SZ",
-                            lambda jd, t: np.asarray(jd["data"]["z_axis_number_of_measurements"], dtype=float)/60000,
-                        )
+            "Z_cond", lambda jd, t: np.asarray(jd["data"]["z_axis_array"], dtype=float),
+        )
         self.add_extractor(
-                    "Y",
-                    lambda jd, t: np.asarray(jd["data"]["orthogonal_phase_axis_array"], dtype=float)
-                    * np.asarray(jd["data"]["p_0_t_array"], dtype=float),
-                )
+            "X_cond",
+            lambda jd, t: np.asarray(jd["data"]["main_phase_axis_array"], dtype=float),
+        )
+        self.add_extractor(
+            "Y_cond",
+            lambda jd, t: np.asarray(jd["data"]["orthogonal_phase_axis_array"], dtype=float),
+        )
+
+    def _point_sigma(self, jd: dict, key: str) -> np.ndarray | None:
+        """Measured per-point error bar of ``S`` / ``S_pooled`` from the raw NPZ.
+
+        ``run_files/raw_data_tests/run_pooled_p0.py`` (``WRITE_ERRORBARS``)
+        splits the repetitions of each file into consecutive blocks, rebuilds
+        both curves per block and writes the block standard error of the
+        mean into ``data.p_0_t_errorbar_meta[key]["sigma"]`` (next to the
+        binomial sigma for comparison).  Files without the block are loaded
+        without error bars; the ``errorbar`` bootstrap then refuses to run.
+
+        When ``data.p_0_t_bootstrap_meta`` holds the key (written by
+        raw_data_tests/bootstrap_s_errorbars.py: std per point over a
+        bootstrap of the file's repetitions, S only) that sigma is used
+        instead.
+        """
+        boot = jd["data"].get("p_0_t_bootstrap_meta") or {}
+        em = jd["data"].get("p_0_t_errorbar_meta") or {}
+        blk = boot.get(key) or em.get(key)
+        if not blk or blk.get("sigma") is None:
+            return None
+        return np.asarray(blk["sigma"], dtype=float)
 
     def _bootstrap_stats(self, jd: dict, mask: np.ndarray | None) -> dict | None:
         """Binomial statistics for every post-selected channel.
@@ -473,8 +556,13 @@ class PostSelectedLoader(ExperimentalLoader):
             v = np.asarray(v, dtype=dtype)
             return v[mask] if mask is not None else v
 
-        navg = int(params.get("actual_navg_repeat_experiment")
-                   or params.get("navg_repeat_experiment") or 30_000)
+        # Every file carries its own repetition count (merged folders hold
+        # files of different runs with different navg) — never a default.
+        navg = (params.get("actual_navg_repeat_experiment")
+                or params.get("navg_repeat_experiment"))
+        if not navg:
+            return None    # no shot count → no data bootstrap for this file
+        navg = int(navg)
 
         # Shared count array for both phase axes (survivors per phase axis)
         n_phase = _arr("phase_axes_number_of_measurements", int)
@@ -524,15 +612,22 @@ class PostSelectedLoader(ExperimentalLoader):
         # bootstrap.bootstrap_post_selected_measurements.  The histogram is
         # kept whole and the curve it produces is masked afterwards, so the
         # pooled points always come from every segment of the file.
+        # The strict pool (segments L > i only) shares the histogram; its
+        # attempts sit in the meta's "strict" block (last point: 0 attempts).
         pm = data.get("p_0_t_pooled_meta") or {}
-        arr = data.get("p_0_t_array_pooled")
-        if arr is not None and pm.get("n_attempts") is not None:
+        pooled = (("S_pooled", data.get("p_0_t_array_pooled"), pm),
+                  ("S_pooled_strict", data.get("p_0_t_array_pooled_strict"),
+                   pm.get("strict") or {}))
+        for key, arr, meta in pooled:
+            if arr is None or meta.get("n_attempts") is None:
+                continue
             v = np.asarray(arr, dtype=float)
-            n = np.asarray(pm["n_attempts"], dtype=np.int64)
+            n = np.asarray(meta["n_attempts"], dtype=np.int64)
             if mask is not None:
                 v, n = v[mask], n[mask]
-            out["S_pooled"] = v
-            out["N_attempts_S_pooled"] = n
+            out[key] = v
+            out[f"N_attempts_{key}"] = n
+        if "S_pooled" in out or "S_pooled_strict" in out:
             hist = pm.get("first_click_counts")
             if hist:
                 n_axes, n_seg = len(hist), len(hist[0])
@@ -638,6 +733,13 @@ class EnsembleAverageLoader(ExperimentalLoader):
         The four outcomes are mutually exclusive results of the same shots
         (they sum to 1), so resampling is one multinomial draw per time
         point — never independent noise per channel.
+
+        Every repetition runs the sequence twice, with the normal and the
+        inverted readout (``inverse_*_stream`` in ``stream_tags``), and each
+        channel is the mean of the two passes
+        (``opx_experiments ... zeno_survival_probability.fetch_results``), so
+        a point holds ``2 * navg`` shots — ``D * 2 navg`` is an integer in
+        every file, ``D * navg`` is not.
         """
         data = jd["data"]
         params = jd.get("parameters", {})
@@ -645,6 +747,7 @@ class EnsembleAverageLoader(ExperimentalLoader):
                 or params.get("navg_repeat_experiment"))
         if not navg:
             return None    # never invent shot counts
+        passes = 2 if "inverse_D_stream" in (params.get("stream_tags") or ()) else 1
 
         P = np.vstack([
             np.asarray(data["D_probability"], dtype=float),
@@ -658,7 +761,7 @@ class EnsembleAverageLoader(ExperimentalLoader):
             "data_mode": "ens_avg",
             "P": P,
             "channels": ["D", "G", "B", "error"],
-            "N_shots": int(navg),
+            "N_shots": passes * int(navg),
         }
 
     def _discover_files(self, folder: Path) -> list[Path]:

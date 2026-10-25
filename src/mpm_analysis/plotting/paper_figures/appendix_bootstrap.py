@@ -24,7 +24,7 @@ def draw_full_spectrum_panel(
     real_axis_ticks: list | None = None,
     err_kws: dict | None = None,
 ) -> None:
-    """Draw the full-pole-spectrum panel: |Re(e_n)| / Ω_S strands vs λ.
+    """Draw the full-pole-spectrum panel: -Re(e_k) / Ω_S strands vs λ.
 
     The shared panel A of the paper bootstrap figures (this module's 3-panel
     sqrt layout and ``first_transition_main``'s 2-panel discriminant layout).
@@ -37,7 +37,9 @@ def draw_full_spectrum_panel(
         LABELS_FONT_SIZE, MARKER_SIZE, LINE_WIDTH, LINECUT_COLORS,
     )
 
-    colors = LINECUT_COLORS + ["gray"]
+    # Slot 0 (EP pair; the faster branch after the split) teal, slot 1 (the
+    # slower branch) purple, slot 2 mustard — the paper's style.
+    colors = [LINECUT_COLORS[1], LINECUT_COLORS[0], LINECUT_COLORS[2], "gray"]
     if err_kws is None:
         err_kws = dict(
             elinewidth=LINE_WIDTH * 0.6,
@@ -48,18 +50,24 @@ def draw_full_spectrum_panel(
 
     for k in range(r_med.shape[1]):
         c = colors[k % len(colors)]
+        kws = dict(err_kws)
+        if k == 0:
+            # Before the EP slots 0 and 1 coincide: slot 0 on top, so the
+            # merged pair shows teal; after the split teal = faster branch.
+            kws["zorder"] = kws.get("zorder", 10) + 1
+        # No abs(): a decay rate <= 0 (a growing pole) must show, not fold over.
         ax.errorbar(
-            lambdas, np.abs(r_med[:, k]),
+            lambdas, r_med[:, k],
             yerr=[r_lower[:, k], r_upper[:, k]],
             color=c, marker="o",
             markersize=MARKER_SIZE,
             linestyle="none",
-            label=rf"$\mathrm{{Re}}(e_{{{k+1}}})$",
-            **err_kws,
+            label=rf"$-\mathrm{{Re}}(e_{{{k+1}}})$",
+            **kws,
         )
     ax.set_yscale(real_axis_scale)
     ax.set_ylabel(
-        r"$\mathrm{Re}(e_n)\,/\,\Omega_\mathrm{S}$",
+        r"$-\mathrm{Re}(e_k)\,/\,\Omega_\mathrm{S}$",
         fontsize=LABELS_FONT_SIZE, labelpad=0,
     )
     ax.legend(loc="upper left", fontsize=LABELS_FONT_SIZE)
@@ -76,12 +84,78 @@ def draw_full_spectrum_panel(
     )
 
 
+def discriminant_line_fit(
+    result, *, lambda_max: float, half_width: float, fit: dict | None = None,
+):
+    """Δ12 / Ω_S² of the EP pair and the straight-line fit through its zero.
+
+    Shared by ``first_transition_main``'s discriminant layout (Δ12 and the
+    line) and the sqrt layout's ``splitting_fit="discriminant"`` overlay (√ of
+    the line).  Δ12 comes from the central poles, followed along λ past the
+    EP; its σ is half the 16/84 spread of the bootstrap draws when the result
+    kept them (``None`` otherwise), and the same σ weights the line fit.
+
+    ``fit`` — a line fit already made elsewhere (``run.py``'s step-3 product
+    ``ep["delta_fit"]``: ``lambda_ep``, ``coef`` in the poles' units,
+    ``lambda_window``) is used as it is, not redone; ``half_width`` is then
+    unused.
+
+    Returns
+    -------
+    (lambdas, delta, sigma, lambda_ep, line)
+        λ ≤ ``lambda_max``, Δ12/Ω_S² and its σ there, the zero of the line
+        and ``dict(coef=[slope, intercept] in Ω_S² units or None,
+        lambda_window=(lo, hi) or None)``.
+    """
+    from mpm_analysis.analysis.ksi_crossing import (
+        discriminant_crossing_samples,
+        discriminant_from_poles,
+        linfit_zero_crossing,
+    )
+
+    omega_s = result.omega_s
+    mask = result.lambda_values <= lambda_max
+    lambdas = result.lambda_values[mask]
+    poles = result.poles[mask]
+
+    # Poles enter Δ quadratically → normalize by Ω_S².
+    central = -poles.decay_rates + 1j * poles.frequencies
+    delta = discriminant_from_poles(central) / omega_s**2
+
+    sigma = None
+    raw = result.poles.raw_samples
+    if raw is not None:
+        _, d_med, d_lo, d_hi = discriminant_crossing_samples(
+            raw, lambda_max=lambda_max, half_width=half_width,
+        )
+        if d_med is not None and len(d_med) == len(lambdas):
+            d_lo = np.asarray(d_lo, dtype=float) / omega_s**2
+            d_hi = np.asarray(d_hi, dtype=float) / omega_s**2
+            sigma = (d_hi - d_lo) / 2
+    if fit is not None:
+        lam_ep = float(fit["lambda_ep"])
+        coef = (None if fit["coef"] is None
+                else np.asarray(fit["coef"], dtype=float) / omega_s**2)
+        window = fit["lambda_window"]
+    else:
+        lam_ep, own = linfit_zero_crossing(
+            lambdas, delta, sigma=sigma, half_width=half_width, return_fit=True,
+        )
+        coef = own["coef"]
+        window = (None if coef is None else
+                  (float(lambdas[own["window"]].min()), float(lambdas[own["window"]].max())))
+    return lambdas, delta, sigma, lam_ep, dict(coef=coef, lambda_window=window)
+
+
 def plot_appendix_bootstrap(
     result,
     *,
     parameters: dict | None = None,
     lambda_max: float = 1.5,
     fit_validity_limit: float | None = None,
+    splitting_fit: str = "sqrt",
+    discriminant_half_width: float = 0.15,
+    discriminant_fit: dict | None = None,
     real_axis_scale: str = "linear",
     real_axis_ticks: list | None = None,
     real_split_axis_ticks: list | None = None,
@@ -94,6 +168,16 @@ def plot_appendix_bootstrap(
     Panel B (mid): imaginary splitting Im(Δe₁₂) / Ω_S vs λ with sqrt fit.
     Panel C (bot): real splitting Re(Δe₁₂) / Ω_S vs λ with fit.
 
+    The overlay in B/C and the vertical line come from ``splitting_fit``:
+
+    * ``"sqrt"`` — the critical-point sqrt fit (``result.critical_point_sqrt_fit``),
+      line at its λ_c.
+    * ``"discriminant"`` — the straight-line fit of Δ12 = (e₁ − e₂)² through
+      its zero (:func:`discriminant_line_fit`), taken as a square root.  The
+      plotted splittings are half the pole difference, so the curves are
+      √(−Δ12)/2 (panel B, below the EP) and √Δ12/2 (panel C, above), drawn
+      over the line-fit window; line at its λ_EP.  Needs no sqrt fit.
+
     Parameters
     ----------
     result:
@@ -103,7 +187,16 @@ def plot_appendix_bootstrap(
     lambda_max:
         Upper λ cutoff for all panels.
     fit_validity_limit:
-        Upper λ cutoff for the fit curve overlay.  Default: ``lambda_max``.
+        Upper λ cutoff for the sqrt-fit overlay.  Default: ``lambda_max``.
+        (The ``"discriminant"`` overlay spans the line-fit window instead.)
+    splitting_fit:
+        ``"sqrt"`` or ``"discriminant"`` — source of the B/C overlay (above).
+    discriminant_half_width:
+        Half-window in λ of the Δ12 line fit (``"discriminant"`` only).
+    discriminant_fit:
+        A Δ12 line fit made elsewhere, drawn as it is instead of refitting
+        (see :func:`discriminant_line_fit`); ``discriminant_half_width`` is
+        then unused.
     real_axis_scale:
         ``"linear"`` or ``"log"`` for panel A.
     real_axis_ticks:
@@ -152,22 +245,48 @@ def plot_appendix_bootstrap(
             "result.poles.has_splitting is False — re-run the analysis to compute splittings."
         )
 
+    # Asymmetric 16/84 bars: a splitting is >= 0 in every draw, so its band
+    # never reaches below zero.  A symmetric bar would wherever the central
+    # value is 0 while some draws already sit on the other side of the EP.
     imag_split = (poles.imag_splitting / omega_s).flatten()
-    imag_err   = ((poles.imag_splitting_upper + poles.imag_splitting_lower) / 2.0 / omega_s).flatten()
+    imag_err   = np.vstack([np.ravel(poles.imag_splitting_lower),
+                            np.ravel(poles.imag_splitting_upper)]) / omega_s
 
     real_split = (poles.real_splitting / omega_s).flatten()
-    real_err   = ((poles.real_splitting_upper + poles.real_splitting_lower) / 2.0 / omega_s).flatten()
+    real_err   = np.vstack([np.ravel(poles.real_splitting_lower),
+                            np.ravel(poles.real_splitting_upper)]) / omega_s
 
     # Fit curves (if available)
-    fit = result.critical_point_sqrt_fit
     lam_fit = imag_fit = real_fit = None
     lc = None
-    if fit is not None and fit.lambda_plot is not None:
-        fv_mask = fit.lambda_plot <= fit_validity_limit
-        lam_fit  = fit.lambda_plot[fv_mask]
-        imag_fit = fit.imag_fit_curve[fv_mask] if fit.imag_fit_curve is not None else None
-        real_fit = fit.real_fit_curve[fv_mask] if fit.real_fit_curve is not None else None
-        lc = fit.lambda_c
+    if splitting_fit == "sqrt":
+        fit = result.critical_point_sqrt_fit
+        if fit is not None and fit.lambda_plot is not None:
+            fv_mask = fit.lambda_plot <= fit_validity_limit
+            lam_fit  = fit.lambda_plot[fv_mask]
+            imag_fit = fit.imag_fit_curve[fv_mask] if fit.imag_fit_curve is not None else None
+            real_fit = fit.real_fit_curve[fv_mask] if fit.real_fit_curve is not None else None
+            lc = fit.lambda_c
+    elif splitting_fit == "discriminant":
+        _, _, _, lam_ep, dfit = discriminant_line_fit(
+            result, lambda_max=lambda_max, half_width=discriminant_half_width,
+            fit=discriminant_fit,
+        )
+        if dfit["coef"] is not None and np.isfinite(lam_ep):
+            # √ of the line over its window (cut at lambda_max), λ_EP on the
+            # grid so both branches reach zero; the other side is clipped to
+            # 0 as in the sqrt fit.
+            lo, hi = dfit["lambda_window"]
+            hi = min(hi, lambda_max)
+            lam_fit = np.union1d(np.linspace(lo, hi, 500), np.clip([lam_ep], lo, hi))
+            d_fit = np.polyval(dfit["coef"], lam_fit)
+            imag_fit = np.sqrt(np.clip(-d_fit, 0.0, None)) / 2.0
+            real_fit = np.sqrt(np.clip(d_fit, 0.0, None)) / 2.0
+            lc = lam_ep
+    else:
+        raise ValueError(
+            f"splitting_fit must be 'sqrt' or 'discriminant', got {splitting_fit!r}."
+        )
 
     # --- Figure layout ---
     fig_w = float(TWO_COLUMN_WIDTH) * 0.67
@@ -256,6 +375,9 @@ def plot_appendix_bootstrap(
     # x-axis tick formatting
     for _ax in [ax_real_split, ax_real_full]:
         _ax.xaxis.set_major_locator(ticker.MultipleLocator(0.5))
+
+    # y labels of all three panels in one column, whatever the tick widths
+    fig.align_ylabels([ax_real_full, ax_imag, ax_real_split])
 
     if save_dir is not None:
         from mpm_analysis.utils.windows_paths import save_figure_pdf_svg

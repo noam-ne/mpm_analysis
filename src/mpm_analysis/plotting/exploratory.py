@@ -246,6 +246,12 @@ def plot_spectrum_panels(result, *, title=None, axes=None, figsize=(15, 6)):
     return fig, axes
 
 
+# Built with LaTeX off: apply_paper_style() (called by plot_ksi_curve and the
+# paper figures earlier in a run) turns text.usetex on globally, and LaTeX
+# cannot compile the unicode λ in the title/slider label — the draw fails and
+# no traces appear.  Each Text keeps the usetex it was created with, so this
+# also holds for every later redraw.
+@plt.rc_context({"text.usetex": False})
 def plot_time_traces_slider(
     records,
     *,

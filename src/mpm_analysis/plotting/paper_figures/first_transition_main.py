@@ -10,10 +10,12 @@ Same style as ``ZenoPlotting/Noams_code/first_transition_plotting.py``
 argument picks the variant:
 
 * ``"sqrt"`` — the 3-panel layout: A full pole spectrum; B/C imaginary and
-  real splitting of the first pair with the square-root fit.  Delegates to
-  :func:`~mpm_analysis.plotting.paper_figures.appendix_bootstrap.plot_appendix_bootstrap`
-  (needs ``result.critical_point_sqrt_fit`` — set by the run's
-  critical-point task).
+  real splitting of the first pair with a square-root overlay.  Delegates to
+  :func:`~mpm_analysis.plotting.paper_figures.appendix_bootstrap.plot_appendix_bootstrap`.
+  ``splitting_fit="sqrt"`` overlays the critical-point sqrt fit (needs
+  ``result.critical_point_sqrt_fit`` — set by the run's critical-point
+  task); ``"discriminant"`` overlays the square root of the Δ12 line fit
+  below (√(−Δ12)/2 and √Δ12/2 around λ_EP).
 * ``"discriminant"`` — 2 panels: the same panel A, and one panel where the
   pair discriminant ``Δ12(λ) = c1² − 4c0`` with its straight-line fit
   through the zero crossing (the EP diagnostic) replaces panels B and C.
@@ -33,10 +35,12 @@ def plot_first_transition_figure(
     layout: str = "sqrt",
     lambda_max: float = 1.5,
     fit_validity_limit: float | None = None,
-    real_axis_scale: str = "log",
+    splitting_fit: str = "sqrt",
+    real_axis_scale: str = "linear",
     real_axis_ticks: list | None = None,
     real_split_axis_ticks: list | None = None,
     discriminant_half_width: float = 0.15,
+    discriminant_fit: dict | None = None,
     save_dir: Path | None = None,
     figure_stem: str = "first_transition_main",
 ) -> "plt.Figure":
@@ -53,6 +57,10 @@ def plot_first_transition_figure(
         Upper λ cutoff for all panels.
     fit_validity_limit:
         Upper λ cutoff of the sqrt-fit overlay (``"sqrt"`` layout only).
+    splitting_fit:
+        ``"sqrt"`` layout only: overlay of panels B/C — ``"sqrt"`` (the
+        critical-point sqrt fit) or ``"discriminant"`` (√ of the Δ12 line
+        fit over ``discriminant_half_width``).
     real_axis_scale, real_axis_ticks:
         Panel A y-scale / manual ticks (``"log"`` is the first-transition
         paper choice).
@@ -60,7 +68,13 @@ def plot_first_transition_figure(
         Panel C y-ticks (``"sqrt"`` layout only).
     discriminant_half_width:
         Half-window in λ of the straight-line fit through the Δ12 crossing
-        (``"discriminant"`` layout only).
+        (``"discriminant"`` layout, and ``"sqrt"`` with
+        ``splitting_fit="discriminant"``).
+    discriminant_fit:
+        A Δ12 line fit made elsewhere (``run.py``'s step-3
+        ``ep["delta_fit"]``), drawn as it is in either layout instead of
+        refitting — the figure then shows exactly that fit and its λ_EP;
+        ``discriminant_half_width`` is unused.
     save_dir, figure_stem:
         When given, save SVG + PDF there.
 
@@ -76,6 +90,9 @@ def plot_first_transition_figure(
             result,
             lambda_max=lambda_max,
             fit_validity_limit=fit_validity_limit,
+            splitting_fit=splitting_fit,
+            discriminant_half_width=discriminant_half_width,
+            discriminant_fit=discriminant_fit,
             real_axis_scale=real_axis_scale,
             real_axis_ticks=real_axis_ticks,
             real_split_axis_ticks=real_split_axis_ticks,
@@ -90,17 +107,13 @@ def plot_first_transition_figure(
     import matplotlib.pyplot as plt
     import matplotlib.ticker as ticker
 
-    from mpm_analysis.analysis.ksi_crossing import (
-        discriminant_crossing_samples,
-        discriminant_from_poles,
-        linfit_zero_crossing,
-    )
     from mpm_analysis.plotting._style import (
         TWO_COLUMN_WIDTH, LABELS_FONT_SIZE, MARKER_SIZE, LINE_WIDTH,
         LAMBDA_OBS_COLOR, add_panel_letter, apply_paper_style,
         make_ax_lines_wider,
     )
     from mpm_analysis.plotting.paper_figures.appendix_bootstrap import (
+        discriminant_line_fit,
         draw_full_spectrum_panel,
     )
 
@@ -117,28 +130,11 @@ def plot_first_transition_figure(
     r_lower = poles.decay_rates_lower / omega_s
     r_upper = poles.decay_rates_upper / omega_s
 
-    # Discriminant of the EP pair (followed along λ past the EP) from the
-    # central poles, normalized by Ω_S² (poles enter Δ quadratically).
-    central = -poles.decay_rates + 1j * poles.frequencies
-    delta = discriminant_from_poles(central) / omega_s**2
-
-    # 16/84 bootstrap band on Δ, when raw samples were kept: the error bars
-    # of the points and the weights of the line fit.
-    yerr = sigma = None
-    raw = result.poles.raw_samples
-    if raw is not None:
-        _, d_med, d_lo, d_hi = discriminant_crossing_samples(
-            raw, lambda_max=lambda_max, half_width=discriminant_half_width,
-        )
-        if d_med is not None and len(d_med) == len(lambdas):
-            d_lo = np.asarray(d_lo, dtype=float) / omega_s**2
-            d_hi = np.asarray(d_hi, dtype=float) / omega_s**2
-            yerr = [np.clip(delta - d_lo, 0.0, None),
-                    np.clip(d_hi - delta, 0.0, None)]
-            sigma = (d_hi - d_lo) / 2
-    lam_ep, dfit = linfit_zero_crossing(
-        lambdas, delta, sigma=sigma, half_width=discriminant_half_width,
-        return_fit=True,
+    # Δ12/Ω_S² of the EP pair and its line fit.  The σ that weights the fit
+    # is drawn symmetric on the points, so the panel shows what was fitted.
+    _, delta, yerr, lam_ep, dfit = discriminant_line_fit(
+        result, lambda_max=lambda_max, half_width=discriminant_half_width,
+        fit=discriminant_fit,
     )
 
     # --- Figure layout: A (spectrum) over B (discriminant) ---
@@ -185,9 +181,9 @@ def plot_first_transition_figure(
         linestyle="none", markersize=MARKER_SIZE,
         **err_kws,
     )
-    if dfit is not None and dfit.get("coef") is not None:
-        lam_w = lambdas[dfit["window"]]
-        lam_line = np.linspace(lam_w.min(), lam_w.max(), 50)
+    if dfit["coef"] is not None:
+        lo, hi = dfit["lambda_window"]
+        lam_line = np.linspace(lo, min(hi, lambda_max), 50)
         ax_delta.plot(
             lam_line, np.polyval(dfit["coef"], lam_line),
             color="k", linestyle="--", linewidth=LINE_WIDTH,

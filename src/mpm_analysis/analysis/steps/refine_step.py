@@ -23,8 +23,8 @@ class RefineStep(AnalysisStep):
     """Nonlinear refinement of raw MPM poles.
 
     Reads ``state["poles_raw"]`` and ``state["lambdas"]``, writes
-    ``state["poles_raw"]`` in-place with refined values (Hungarian-matched to
-    the initial poles, so branch labels from ``MPMStep`` are preserved) and
+    ``state["poles_raw"]`` in-place with refined values (in the same canonical
+    slot order as every other pole set) and
     updates ``state["amplitudes_raw"]`` accordingly.  Also writes:
 
         ``state["refine_params"]``    : list of optimal parameter vectors (or None)
@@ -89,7 +89,7 @@ class RefineStep(AnalysisStep):
             refine_poles,
             solve_linear_amplitudes,
         )
-        from mpm_analysis.analysis.pole_sorting import match_poles_hungarian
+        from mpm_analysis.analysis.pole_sorting import sort_poles_canonical
         from mpm_analysis.data_types.observables import group_records_by_lambda
 
         poles_raw: list = state.get("poles_raw", [])
@@ -144,9 +144,8 @@ class RefineStep(AnalysisStep):
                     bounds_imag=self.bounds_imag,
                     return_cov=True,
                 )
-                # Keep the branch labels assigned by MPMStep's cross-lambda
-                # tracking: match refined poles back to their initial poles.
-                poles_r = match_poles_hungarian(poles_r, poles)
+                # Same canonical slot order as every other pole set.
+                poles_r = sort_poles_canonical(poles_r)
                 poles_refined.append(poles_r)
                 refine_params.append(p_opt)
                 refine_cov.append(cov_p)

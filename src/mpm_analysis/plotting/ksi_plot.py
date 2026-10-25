@@ -113,11 +113,17 @@ def plot_ksi_curve(
                        label=rf"$\lambda_{{\xi=0}} = {lc:.3f}$")
 
     ax.set_xlabel(r"$\lambda$", fontsize=fs)
-    ax.set_ylabel(r"$\xi = (2e_3 - \mathrm{Re}\,e_2)\,/\,(\mathrm{Re}\,e_2 - e_3)$",
-                  fontsize=fs)
-    ax.set_title(title or "State freezing: zero of "
-                 rf"$\xi$ (poles {ksi_result.pole_idx1}, {ksi_result.pole_idx2})",
-                 fontsize=fs)
+    # Pole route: ξ from e2/e3; spiral route (SpiralKsiResult): ξ = γ0/γa − 1
+    # from the fitted rates — the result says which through ``ksi_label``.
+    if hasattr(ksi_result, "pole_idx1"):
+        ylabel = r"$\xi = (2e_3 - \mathrm{Re}\,e_2)\,/\,(\mathrm{Re}\,e_2 - e_3)$"
+        default_title = ("State freezing: zero of "
+                         rf"$\xi$ (poles {ksi_result.pole_idx1}, {ksi_result.pole_idx2})")
+    else:
+        ylabel = getattr(ksi_result, "ksi_label", r"$\xi = \gamma_0/\gamma_a - 1$")
+        default_title = r"State freezing: zero of $\xi$ (spiral approach rate)"
+    ax.set_ylabel(ylabel, fontsize=fs)
+    ax.set_title(title or default_title, fontsize=fs)
     ax.legend(fontsize=fs * 0.8)
     ax.grid(False)
     return ax
@@ -131,6 +137,7 @@ def plot_discriminant_curve(
     lambda_ep=None,
     first_crossing=None,
     crossing_quantiles=None,
+    delta_sigma=None,
     delta_lower=None,
     delta_upper=None,
     ax=None,
@@ -156,9 +163,14 @@ def plot_discriminant_curve(
         Line-fit zero (dashed vertical) and the raw first sign change (dotted).
     crossing_quantiles:
         ``(16, 50, 84)`` percentiles of the per-realization line fits, shaded.
+    delta_sigma:
+        1-σ error bar of every point — the SAME σ the line fit was weighted
+        with (``1/σ²``), drawn symmetric about the point, so the plot shows
+        exactly what was fitted.
     delta_lower, delta_upper:
-        16/84 percentiles of the per-realization Delta curves — drawn as error
-        bars on the points.
+        Legacy alternative to ``delta_sigma``: 16/84 percentiles of the
+        per-realization Delta curves, drawn as (asymmetric) bars around the
+        points.  Ignored when ``delta_sigma`` is given.
     ax, color, crossing_color, title:
         Cosmetics; ``ax`` is created when ``None``.
 
@@ -173,7 +185,10 @@ def plot_discriminant_curve(
 
     lam = np.asarray(lambdas, dtype=float)
     d = np.asarray(delta, dtype=float)
-    yerr = _asym_yerr(d, delta_lower, delta_upper)
+    if delta_sigma is not None:
+        yerr = np.asarray(delta_sigma, dtype=float)
+    else:
+        yerr = _asym_yerr(d, delta_lower, delta_upper)
 
     ax.axhline(0, color="k", ls="--", lw=lw * 0.6, alpha=0.7)
     ax.errorbar(lam, d, yerr=yerr, color=color, marker="o", linestyle="none",

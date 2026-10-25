@@ -253,7 +253,16 @@ class ClickRecordNpzLoader:
         T = len(t_us)
 
         npz = np.load(win_long_path(npz_path), allow_pickle=False)
-        raw = npz["assigned_states"]
+        if "assigned_states" in npz.files:
+            raw = npz["assigned_states"]
+        elif "clicks" in npz.files:
+            # Scan-8 full-record format (combine_scan8_iterations.py): the
+            # same (n_reps, n_axes, Σ i) segmented bool layout under the
+            # name ``clicks`` (True = click = bright bin), no assigned_states.
+            raw = npz["clicks"]
+        else:
+            raise KeyError(f"{npz_path.name}: neither 'assigned_states' nor "
+                           f"'clicks' in the NPZ (keys: {npz.files}).")
 
         meta: dict = {}
         for k in ("navg_repeat_experiment", "navg", "n_avg",

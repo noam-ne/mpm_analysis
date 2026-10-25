@@ -17,6 +17,7 @@ def plot_survival_curves_panel(
     target_lambdas: np.ndarray | None = None,
     colors: list | None = None,
     fit_dir: Path | None = None,
+    fit_result=None,
     downsample: int = 1,
     markersize: float | None = None,
     linewidth: float | None = None,
@@ -39,6 +40,11 @@ def plot_survival_curves_panel(
     fit_dir:
         If given, overlay per-lambda fit curves from this directory (matched
         by ``<N>_kHz`` in filename).
+    fit_result:
+        ``ZenoAnalysisResult`` whose poles draw the overlay instead of
+        ``fit_dir``: Σ A_k exp(p_k t) with the result's central poles at the
+        record's λ (exact match) and amplitudes re-solved on the trace — the
+        construction of run.py's slider and export.
     downsample:
         Plot every ``downsample``-th time point.
     markersize, linewidth:
@@ -110,21 +116,25 @@ def plot_survival_curves_panel(
         )
 
         # Overlay fit curve
-        if fit_index:
+        curve = None
+        if fit_result is not None:
+            curve = _modal_fit_curve(rec, fit_result)
+        elif fit_index:
             fit_jd = _load_fit_for_record(rec, fit_index)
             if fit_jd is not None:
                 try:
-                    t_fit, y_fit = _extract_fit_arrays(fit_jd)
-                    ax.plot(
-                        t_fit, y_fit,
-                        color=color,
-                        ls=FIT_LINESTYLE,
-                        linewidth=FIT_LINEWIDTH,
-                        alpha=0.95,
-                        zorder=25,
-                    )
+                    curve = _extract_fit_arrays(fit_jd)
                 except Exception:
                     pass
+        if curve is not None:
+            ax.plot(
+                *curve,
+                color=color,
+                ls=FIT_LINESTYLE,
+                linewidth=FIT_LINEWIDTH,
+                alpha=0.95,
+                zorder=25,
+            )
 
     ax.set_ylabel(SURVIVAL_PROBABILITY_LABEL, fontsize=LABELS_FONT_SIZE)
     ax.set_xlabel(r"Time ($\mu$s)", fontsize=LABELS_FONT_SIZE, labelpad=1.0)
@@ -175,6 +185,21 @@ def _load_fit_for_record(rec, fit_index: dict) -> dict | None:
         return None
     with open(win_long_path(fp), "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def _modal_fit_curve(rec, result, n_smooth: int = 300) -> tuple[np.ndarray, np.ndarray] | None:
+    """The result's modal fit of *rec* on a smooth grid; None without finite poles at its λ."""
+    from mpm_analysis.analysis.matrix_pencil import (
+        reconstruct_signal, solve_linear_amplitudes,
+    )
+    lam = np.asarray(result.lambda_values, dtype=float)
+    i = int(np.argmin(np.abs(lam - rec.lambda_val)))
+    poles = -result.poles.decay_rates[i] + 1j * result.poles.frequencies[i]
+    if abs(lam[i] - rec.lambda_val) > 1e-6 or not np.all(np.isfinite(poles)):
+        return None
+    amps = solve_linear_amplitudes(rec.t, rec.signal, poles)
+    t = np.linspace(float(rec.t[0]), float(rec.t[-1]), n_smooth)
+    return t, reconstruct_signal(t, poles, amps)
 
 
 def _extract_fit_arrays(fit_jd: dict) -> tuple[np.ndarray, np.ndarray]:

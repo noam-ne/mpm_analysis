@@ -15,6 +15,8 @@ def plot_decay_and_freq_panel(
     lambda_max: float | None = None,
     pole_selection: str = "second_smallest_decay",
     downsample: int = 1,
+    keep_all_within: float | None = None,
+    keep_first: int = 0,
     show_sqrt_fit: bool = True,
     show_critical_line: bool = True,
     annotate_lambda_c: bool = False,
@@ -23,6 +25,7 @@ def plot_decay_and_freq_panel(
     markersize: float | None = None,
     linewidth: float | None = None,
     yticks_freq: list | None = None,
+    ylim_decay: tuple[float, float] | None = None,
 ) -> tuple["plt.Axes", "plt.Axes"]:
     """Plot decay rate (left axis) and oscillation frequency (right axis) vs λ.
 
@@ -38,9 +41,18 @@ def plot_decay_and_freq_panel(
         Which pole to plot.  Options:
         ``"second_smallest_decay"`` (default, matches original paper),
         ``"smallest_decay"``,
-        ``int`` (0-indexed).
+        ``int`` (0-indexed canonical slot; 1 = "Pole 2" of the spectrum
+        plot = the EP pair's slow member past the EP).  The decay-sorting
+        options break the tie of a conjugate pair towards slot 0, whose error
+        bars carry the fast pole of the draws that have split — use the slot.
     downsample:
         Keep every ``downsample``-th lambda point.
+    keep_all_within:
+        λ half-width around the transition (λ_c of the sqrt fit) inside which
+        every point is kept; ``downsample`` then thins only the points farther
+        away.  ``None`` (or no sqrt fit) → plain ``downsample`` everywhere.
+    keep_first:
+        The first ``keep_first`` λ points are always kept (sparse low-λ end).
     show_sqrt_fit:
         If ``True`` and ``result.critical_point_sqrt_fit`` is present, overlay
         the fit curve on the frequency axis.
@@ -50,6 +62,9 @@ def plot_decay_and_freq_panel(
         If ``True``, add a text annotation for λ_c.
     yticks_freq:
         Override tick positions on the right (frequency) axis.
+    ylim_decay:
+        Fixed (bottom, top) of the left (decay-rate) axis; error bars reaching
+        past it are clipped at the frame.  ``None`` → autoscale.
 
     Returns
     -------
@@ -92,30 +107,49 @@ def plot_decay_and_freq_panel(
     else:
         raise ValueError(f"Unknown pole_selection '{pole_selection}'.")
 
+    # Central value AND both error-bar halves from the same slot: the slots of
+    # a conjugate pair share the central decay but not the bootstrap spread
+    # (in draws past the EP slot 0 takes the fast real pole).
     rows = np.arange(len(lam))
     r2      = poles_m.decay_rates[rows, idx_pol] / omega_s
+    r2_lo   = poles_m.decay_rates_lower[rows, idx_pol] / omega_s
     r2_err  = poles_m.decay_rates_upper[rows, idx_pol] / omega_s
     f2      = poles_m.frequencies[rows, idx_pol] / omega_s
+    f2_lo   = poles_m.frequencies_lower[rows, idx_pol] / omega_s
     f2_err  = poles_m.frequencies_upper[rows, idx_pol] / omega_s
 
-    # Downsample
-    s = slice(None, None, downsample)
-    lam_ds = lam[s]; r2 = r2[s]; r2_err = r2_err[s]
-    f2 = f2[s]; f2_err = f2_err[s]
+    # Downsample: every n-th point, plus every point within keep_all_within of λ_c
+    sqrt_fit = result.critical_point_sqrt_fit
+    lam_c = sqrt_fit.lambda_c if (keep_all_within is not None and sqrt_fit is not None) else None
+
+    def _keep(x):
+        x = np.asarray(x, dtype=float)
+        keep = np.zeros(len(x), dtype=bool)
+        keep[::downsample] = True
+        keep[:keep_first] = True
+        if lam_c is not None:
+            keep |= np.abs(x - lam_c) <= keep_all_within
+        return keep
+
+    s = _keep(lam)
+    lam_ds = lam[s]; r2 = r2[s]; r2_lo = r2_lo[s]; r2_err = r2_err[s]
+    f2 = f2[s]; f2_lo = f2_lo[s]; f2_err = f2_err[s]
 
     err_kw = dict(
         ls="none", marker="o", markersize=ms,
         elinewidth=lw * 0.6,
-        capsize=ms * 1.2,
+        capsize=ms * 0.8,         # = MARKER_SIZE * 1.2 at the default ms, as in the paper figure
         capthick=lw * 0.6,
         zorder=10,
     )
 
     # -- Left axis: decay rate --
-    ax.errorbar(lam_ds, r2, yerr=r2_err, color=decay_c, alpha=0.85, **err_kw)
+    ax.errorbar(lam_ds, r2, yerr=[r2_lo, r2_err], color=decay_c, alpha=0.85, **err_kw)
     ax.set_xlabel(r"$\lambda$", fontsize=LABELS_FONT_SIZE, labelpad=1.0)
     ax.set_ylabel(r"Decay rate / $\Omega_\mathrm{S}$", fontsize=LABELS_FONT_SIZE)
     ax.tick_params(axis="y", colors=decay_c)
+    if ylim_decay is not None:
+        ax.set_ylim(*ylim_decay)
     make_ax_lines_wider(ax)
 
     # -- Right axis: frequency / imaginary splitting --
@@ -136,9 +170,10 @@ def plot_decay_and_freq_panel(
         # PRIMARY: imaginary splitting data from the sqrt-fit window.
         # imag_split_data and imag_split_err are already normalised by omega_s
         # inside critical_point.fit_sqrt_to_eigenvalues().
-        lam_split = fit.lambda_data[::downsample]
-        freq_split = fit.imag_split_data[::downsample]
-        err_split = fit.imag_split_err[::downsample]
+        s_split = _keep(fit.lambda_data)
+        lam_split = np.asarray(fit.lambda_data)[s_split]
+        freq_split = np.asarray(fit.imag_split_data)[s_split]
+        err_split = np.asarray(fit.imag_split_err)[s_split]
 
         ax_freq.errorbar(
             lam_split, freq_split, yerr=err_split,
@@ -148,12 +183,12 @@ def plot_decay_and_freq_panel(
         # FALLBACK: pole frequencies for lambda points NOT covered by the fit window.
         # (matches reference: "fill missing" logic using pole-frequency fallback)
         tol = 1e-6
-        for lp, fp, ep in zip(lam_ds, f2, f2_err):
+        for lp, fp, el, ep in zip(lam_ds, f2, f2_lo, f2_err):
             if np.isnan(fp):
                 continue
             if not np.any(np.isclose(fit.lambda_data, lp, atol=tol, rtol=0.0)):
                 ax_freq.errorbar(
-                    [lp], [fp], yerr=[ep],
+                    [lp], [fp], yerr=[[el], [ep]],
                     color=freq_c, alpha=0.85, **err_kw,
                 )
 
@@ -169,7 +204,7 @@ def plot_decay_and_freq_panel(
             )
     else:
         # No fit available: fall back to raw pole frequencies
-        ax_freq.errorbar(lam_ds, f2, yerr=f2_err, color=freq_c, alpha=0.85, **err_kw)
+        ax_freq.errorbar(lam_ds, f2, yerr=[f2_lo, f2_err], color=freq_c, alpha=0.85, **err_kw)
 
     # -- Critical-point line --
     if show_critical_line and result.critical_point_sqrt_fit is not None:
