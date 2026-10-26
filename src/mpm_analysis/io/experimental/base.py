@@ -19,6 +19,7 @@ with a key and a function that extracts the signal from the raw JSON dict:
 """
 from __future__ import annotations
 
+import fnmatch
 import json
 import re
 import time
@@ -76,7 +77,8 @@ def _load_json(path: Path, *, retries: int = 5, delay: float = 3.0) -> dict:
 # the same t=0 normalisation anchor as the survival observables.  The Bloch
 # coordinates (X/Y/Z) and the raw shot counts are measurements at t=0 and are
 # never touched by ``init_error``.
-_INIT_ERROR_STAT_FIELDS = ("survival", "SX", "SZ", "S_pooled", "S_pooled_strict")
+_INIT_ERROR_STAT_FIELDS = ("survival", "SX", "SZ", "S_pooled", "S_pooled_strict",
+                           "S_next", "S_next_far", "S_next_x2")
 
 
 def _defined_length(extractors: dict, jd: dict, t: np.ndarray,
@@ -317,6 +319,7 @@ class ExperimentalLoader(ABC):
         *,
         lambda_range: tuple[float, float] | None = None,
         max_files: int | None = None,
+        file_glob: str | None = None,
         t_max: float | None = None,
         t_min: float | None = None,
         drop_first_point: bool = False,
@@ -340,6 +343,10 @@ class ExperimentalLoader(ABC):
         max_files:
             If given, load only the first ``max_files`` files (useful for
             quick local testing).
+        file_glob:
+            If given, load only the files whose NAME matches this glob, e.g.
+            ``"*_15_10_2026__10_08_55.json"`` — one source run of a folder
+            that merges several.  Default ``None`` loads every file.
         t_max:
             If given, truncate each signal to times ``t <= t_max`` (in µs).
             Default ``None`` loads the full time axis.
@@ -433,6 +440,8 @@ class ExperimentalLoader(ABC):
 
         folder = Path(folder)
         files = self._discover_files(folder)
+        if file_glob is not None:
+            files = [f for f in files if fnmatch.fnmatch(f.name, file_glob)]
         if max_files is not None:
             files = files[:max_files]
 

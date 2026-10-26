@@ -197,6 +197,9 @@ def linfit_zero_crossing(
     n_refits: int = 2,
     direction: str = "any",
     return_fit: bool = False,
+    min_points: int = 5,
+    n_below: int | None = None,
+    n_above: int | None = None,
 ):
     """Zero of a straight line fitted to ``values`` around its first crossing.
 
@@ -204,6 +207,9 @@ def linfit_zero_crossing(
     line fitted over a window around the crossing uses every point in that
     window instead of the two that happen to bracket the sign change.  The
     window is seeded at the first sign change and re-centred ``n_refits`` times.
+    On a coarse λ grid (scan 3: ~0.15 apart) ``±half_width`` can hold fewer
+    than ``min_points`` points; the window then widens to the ``min_points``
+    points nearest the estimate instead of reporting no crossing.
 
     Parameters
     ----------
@@ -222,41 +228,94 @@ def linfit_zero_crossing(
         Passed to :func:`find_zero_crossings` for the seed.
     return_fit:
         Also return ``dict(coef=[slope, intercept], window=bool mask,
-        half_width=..., weighted=bool)`` of the last accepted fit (``coef``
-        is ``None`` when the fit failed) — for plotting.
+        half_width=..., weighted=bool, widened=bool, sigma_zero, chi2, dof)``
+        of the last accepted fit (``coef`` is ``None`` when the fit failed).
+        ``widened`` marks a window grown to ``min_points`` points.  With
+        ``sigma``: ``sigma_zero`` = 1-σ error of the returned zero from the
+        fit covariance (error bars taken as absolute, not rescaled by the
+        residuals) and ``chi2`` over ``dof`` = points - 2; None unweighted.
+    min_points:
+        Fewest points a fit uses.
+    n_below, n_above:
+        Fixed window instead of ``±half_width``: the ``n_below`` points up to
+        the last point below zero before the curve's first rise through zero,
+        and the ``n_above`` points after it (fewer where the curve ends).
+        One fit, no re-centring; ``half_width`` / ``n_refits`` /
+        ``min_points`` / ``direction`` are then unused.
 
     Returns
     -------
     float or (float, dict)
-        The fitted crossing (NaN if there is none or too few points).
+        The fitted crossing (NaN if there is no sign change or the curve has
+        fewer than ``min_points`` finite points).
     """
     lam = np.asarray(lambdas, dtype=float)
     val = np.asarray(values, dtype=float)
     sig = None if sigma is None else np.asarray(sigma, dtype=float)
-    cross = find_zero_crossings(lam, val, direction=direction)
-    x0 = cross[0] if cross else np.nan
-    fit = None
-    for _ in range(n_refits):
-        if not np.isfinite(x0):
-            break
-        w = (np.abs(lam - x0) <= half_width) & np.isfinite(val)
-        if w.sum() >= 5:
-            weights = None
-            if sig is not None:
-                s = sig[w]
-                ok = np.isfinite(s) & (s > 0)
-                if ok.any():
-                    weights = 1.0 / np.where(ok, s, np.median(s[ok]))
-            coef = np.polyfit(lam[w], val[w], 1, w=weights)
-            fit = dict(coef=coef, window=w, half_width=half_width,
-                       weighted=weights is not None)
-            x0 = -coef[1] / coef[0] if coef[0] != 0 else np.nan
+    finite = np.isfinite(lam) & np.isfinite(val)
+
+    def _fit_window(w, widened):
+        """Line through the points of ``w`` (weighted when sigma is given)."""
+        weights = None
+        if sig is not None:
+            s = sig[w]
+            ok = np.isfinite(s) & (s > 0)
+            if ok.any():
+                weights = 1.0 / np.where(ok, s, np.median(s[ok]))
+        fit = dict(window=w, half_width=half_width, weighted=weights is not None,
+                   widened=widened, n_below=n_below, n_above=n_above,
+                   sigma_zero=None, chi2=None, dof=int(w.sum()) - 2)
+        if weights is None:
+            coef = np.polyfit(lam[w], val[w], 1)
         else:
-            x0 = np.nan
+            # absolute error bars: covariance unscaled by the residuals
+            coef, cov = np.polyfit(lam[w], val[w], 1, w=weights, cov="unscaled")
+            a, b = coef
+            if a != 0:
+                jac = np.array([b / a**2, -1.0 / a])          # d(-b/a) / d(a, b)
+                fit["sigma_zero"] = float(np.sqrt(jac @ cov @ jac))
+            r = (val[w] - np.polyval(coef, lam[w])) * weights
+            fit["chi2"] = float(r @ r)
+        fit["coef"] = coef
+        return (-coef[1] / coef[0] if coef[0] != 0 else np.nan), fit
+
+    fit = None
+    if n_below is not None or n_above is not None:
+        # Fixed point count around the first rise of the curve through zero:
+        # the n_below finite points up to the last one below zero and the
+        # n_above after it — no half-width, no re-centring.
+        nb, na = int(n_below or 0), int(n_above or 0)
+        idx = np.flatnonzero(finite)
+        v = val[idx]
+        rise = np.flatnonzero((v[:-1] < 0) & (v[1:] >= 0))
+        x0 = np.nan
+        if rise.size and nb + na >= 2:
+            j = int(rise[0])                       # last point below zero
+            sel = idx[max(0, j - nb + 1): j + 1 + na]
+            if sel.size >= 2:
+                w = np.zeros_like(finite)
+                w[sel] = True
+                x0, fit = _fit_window(w, widened=False)
+    else:
+        cross = find_zero_crossings(lam, val, direction=direction)
+        x0 = cross[0] if cross else np.nan
+        for _ in range(n_refits):
+            if not np.isfinite(x0) or finite.sum() < min_points:
+                x0 = np.nan
+                break
+            w = (np.abs(lam - x0) <= half_width) & finite
+            widened = bool(w.sum() < min_points)
+            if widened:
+                # coarse grid: the min_points finite points nearest the estimate
+                dist = np.where(finite, np.abs(lam - x0), np.inf)
+                w = np.zeros_like(finite)
+                w[np.argsort(dist, kind="stable")[:min_points]] = True
+            x0, fit = _fit_window(w, widened)
     x0 = float(x0)
     if return_fit:
         return x0, (fit or dict(coef=None, window=None, half_width=half_width,
-                                weighted=False))
+                                weighted=False, n_below=n_below, n_above=n_above,
+                                sigma_zero=None, chi2=None, dof=None))
     return x0
 
 

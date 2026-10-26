@@ -389,6 +389,7 @@ def pooled_survival_from_counts(
     counts: np.ndarray,
     *,
     min_extra_bins: int = 0,
+    segment_offsets: tuple[int, ...] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Segment-pooled survival curve from a first-click histogram.
 
@@ -404,6 +405,15 @@ def pooled_survival_from_counts(
     own last bin, which the assignment filter is known to read bright too
     often — at the price of an undefined last point (NaN).
 
+    ``segment_offsets = (d, …)`` replaces the pool by exactly the segments
+    ``L = i + d``, one per offset: ``(1,)`` is the segment one bin longer
+    (never a record-ending bin, one segment per point like the stored
+    curve), ``(1, 1 + n_seg // 2)`` adds its partner half a record later —
+    the two segment sets are disjoint, so every segment still serves one
+    point.  A point where any ``i + d`` exceeds ``n_seg`` is NaN, so every
+    defined point has the same attempts.  Not combinable with
+    ``min_extra_bins``.
+
     Returns ``(fraction, n_success, n_attempts)``, each of shape
     ``(n_seg + 1,)`` aligned with the file's ``time_array``.  The fraction is
     the pooled ratio over the axes (they carry equal attempts, so it is also
@@ -414,6 +424,12 @@ def pooled_survival_from_counts(
     if n_k != n_seg + 1:
         raise ValueError(f"counts has {n_k} first-click slots for {n_seg} "
                          f"segments; expected n_seg + 1.")
+    if segment_offsets is not None:
+        if min_extra_bins:
+            raise ValueError("segment_offsets and min_extra_bins are exclusive.")
+        offsets = np.asarray(segment_offsets, dtype=int)
+        if offsets.size == 0 or offsets.min() < 0 or np.unique(offsets).size != offsets.size:
+            raise ValueError(f"segment_offsets must be distinct ints >= 0, got {segment_offsets}.")
     per_seg = counts.sum(axis=-1)                       # (A, n_seg) shots
     # tail[a, L-1, m] = shots whose first bright bin is >= m  (m = 1 … n_seg),
     # with a zero column appended so tail[..., n_seg + 1] exists.
@@ -425,7 +441,12 @@ def pooled_survival_from_counts(
     n_attempts = np.zeros(n_seg + 1, dtype=np.int64)
     n_success[0] = n_attempts[0] = int(per_seg.sum())
     for i in range(1, n_seg + 1):
-        use = L >= i + min_extra_bins
+        if segment_offsets is None:
+            use = L >= i + min_extra_bins
+        elif i + offsets.max() > n_seg:
+            continue
+        else:
+            use = np.isin(L, i + offsets)
         if not use.any():
             continue
         # survivors to bin i in segment L: never bright + first bright > i
@@ -436,6 +457,25 @@ def pooled_survival_from_counts(
         fraction = np.where(n_attempts > 0,
                             n_success / np.maximum(n_attempts, 1), np.nan)
     return fraction, n_success, n_attempts
+
+
+# Survival observables rebuilt from the first-click histogram: key -> the
+# ``pooled_survival_from_counts`` keywords for a record of ``n_seg``
+# segments.  One table for PostSelectedLoader and the data bootstrap.
+#   S_pooled         every segment L >= i
+#   S_pooled_strict  every segment L > i (no record-ending ring-down bin)
+#   S_next           segment L = i + 1 only: no ring-down bin, one segment per
+#                    point (shots of the stored S, independent points)
+#   S_next_far       segment L = i + 1 + n_seg // 2 only (second half)
+#   S_next_x2        both: disjoint halves, 2x shots, record ends at
+#                    i = n_seg - 1 - n_seg // 2
+HISTOGRAM_SURVIVALS = {
+    "S_pooled": lambda n_seg: {},
+    "S_pooled_strict": lambda n_seg: {"min_extra_bins": 1},
+    "S_next": lambda n_seg: {"segment_offsets": (1,)},
+    "S_next_far": lambda n_seg: {"segment_offsets": (1 + n_seg // 2,)},
+    "S_next_x2": lambda n_seg: {"segment_offsets": (1, 1 + n_seg // 2)},
+}
 
 
 # ---------------------------------------------------------------------------

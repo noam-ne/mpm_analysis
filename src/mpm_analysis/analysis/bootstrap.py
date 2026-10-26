@@ -273,12 +273,20 @@ _POST_SELECTED_SURVIVAL = {
     # The same pool without each segment's own last bin (segments L > i only;
     # the record ends one bin earlier) — same histogram, same draw.
     "S_pooled_strict": ("S_pooled_strict", "N_attempts_S_pooled_strict"),
+    # One named segment per point (L = i + 1, its half-record partner, or
+    # both) — same histogram, same draw; points independent.
+    "S_next": ("S_next", "N_attempts_S_next"),
+    "S_next_far": ("S_next_far", "N_attempts_S_next_far"),
+    "S_next_x2": ("S_next_x2", "N_attempts_S_next_x2"),
 }
 
-# Pooled curves rebuilt from the first-click histogram: observable key ->
-# ``min_extra_bins`` of ``pooled_survival_from_counts`` (1 = leave out the
-# segment that ends at t_i, whose last bin reads bright too often).
-_POOLED_MIN_EXTRA_BINS = {"S_pooled": 0, "S_pooled_strict": 1}
+
+def _histogram_survivals() -> dict:
+    """Survivals rebuilt from the first-click histogram: key -> keyword rule
+    (``click_record_npz.HISTOGRAM_SURVIVALS``, imported lazily like
+    ``pooled_survival_from_counts`` below)."""
+    from mpm_analysis.io.experimental.click_record_npz import HISTOGRAM_SURVIVALS
+    return HISTOGRAM_SURVIVALS
 
 
 def _draw_pooled_counts(stats: dict, rng: np.random.Generator) -> np.ndarray:
@@ -307,10 +315,12 @@ def _resample_pooled_survival(
     curve — including the correlation between consecutive points, which a
     per-point binomial would drop.
 
-    ``key`` picks the curve: ``"S_pooled"`` (every segment ``L >= i``) or
-    ``"S_pooled_strict"`` (``L > i``).  ``draw`` is a histogram resample
+    ``key`` picks the curve: ``"S_pooled"`` (every segment ``L >= i``),
+    ``"S_pooled_strict"`` (``L > i``) or ``"S_next"`` / ``"S_next_far"`` /
+    ``"S_next_x2"`` (the named segments ``L = i + 1`` and/or
+    ``i + 1 + n_seg // 2``).  ``draw`` is a histogram resample
     already made in this bootstrap iteration (``_draw_pooled_counts``), so
-    both curves of a joint fit come from the same resampled shots; ``None``
+    every curve of a joint fit comes from the same resampled shots; ``None``
     draws a new one.
 
     The curve is rebuilt on the file's full time axis and then cut by
@@ -325,7 +335,7 @@ def _resample_pooled_survival(
     if draw is None:
         draw = _draw_pooled_counts(stats, rng)
     frac, _, n_att = pooled_survival_from_counts(
-        draw, min_extra_bins=_POOLED_MIN_EXTRA_BINS[key])
+        draw, **_histogram_survivals()[key](draw.shape[1]))
 
     mask = stats.get("pooled_mask")
     measured = np.asarray(stats[key], dtype=float)
@@ -412,9 +422,9 @@ def bootstrap_post_selected_measurements(
         """Binomial draw of one experiment's survival on its own attempts."""
         if skey in survival_cache:
             return survival_cache[skey]
-        if skey in _POOLED_MIN_EXTRA_BINS and stats.get("pooled_counts") is not None:
+        if skey in _histogram_survivals() and stats.get("pooled_counts") is not None:
             # one histogram draw per resample, shared by every pooled curve
-            # of the call (S_pooled and S_pooled_strict are the same shots)
+            # of the call (S_pooled, S_pooled_strict, S_next… are the same shots)
             if "_pooled_draw" not in survival_cache:
                 survival_cache["_pooled_draw"] = _draw_pooled_counts(stats, rng)
             survival_cache[skey] = _resample_pooled_survival(

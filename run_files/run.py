@@ -32,6 +32,9 @@ Steps of a transition and what they produce:
                                           Hankel singular-value ratio is near the noise floor
     2  run_mpm            → result, json  matrix-pencil poles + error bars; the saved result JSON
     3  run_transitions    → ep            exceptional point (Delta = 0 of the pole pair)
+    3c run_window_sweep   → window_sweep  (first only) steps 1-3 redone for ~6 fit windows
+                                          (t_min or t_max moved); one Delta figure, λ_EP ± error
+                                          per window in the legend
     3a run_pole_state_freezing → ksi      (first only) state freezing from the pencil poles,
                                           ksi = (2·Re e3 − Re e2)/(Re e2 − Re e3) = 0
     3b run_spiral_state_freezing → spiral (first only) state freezing from a DIRECT fit of the
@@ -56,7 +59,9 @@ running anything (run_files/write_shots_per_lambda.py reads
 """
 from __future__ import annotations
 
+import fnmatch
 import json
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -70,7 +75,7 @@ from mpm_analysis.pipeline.critical_point_pipeline import CriticalPointPipeline
 from mpm_analysis.pipeline.benchmark_pipeline import BenchmarkPipeline
 from mpm_analysis.analysis.steps import MPMStep, BootstrapStep, RefineStep
 from mpm_analysis.analysis.ksi_crossing import (
-    KsiCrossingPipeline, KsiCrossingResult, discriminant_crossing_samples,
+    KsiCrossingPipeline, KsiCrossingResult,
     discriminant_from_poles, linfit_zero_crossing, find_zero_crossings,
 )
 from mpm_analysis.analysis.matrix_pencil import (
@@ -82,7 +87,9 @@ from mpm_analysis.plotting.spiral_plot import plot_spiral_fits_slider
 from mpm_analysis.data_types.analysis_result import ZenoAnalysisResult
 from mpm_analysis.data_types.observables import ObservableRecord
 from mpm_analysis.data_types.pole_samples import PoleSamples
-from mpm_analysis.plotting.ksi_plot import plot_ksi_curve, plot_discriminant_curve
+from mpm_analysis.plotting.ksi_plot import (
+    plot_ksi_curve, plot_discriminant_curve, plot_discriminant_window_sweep,
+)
 from mpm_analysis.io.analysis_json import (
     augment_json_with_ksi, augment_json_with_transitions,
 )
@@ -128,10 +135,27 @@ PARITY_FOLDER = Path(get_lab_path(
 # match what make_third_transition_figure.py loads for panel A.
 # All iterations of scan 8 merged per point (raw_data_tests/combine_scan8_iterations.py;
 # rerun it after more scan_iteration_* points land, it refreshes the folder)
-POST_SELECTED_FOLDER = POST_SELECTED_FOLDER = Path(_NEW_SCAN_FOLDER) / "scan_experiment_results_3" / "combined_iterations"
-
-
-# POST_SELECTED_FOLDER = Path(_NEW_SCAN_FOLDER) / "combined_results_4_and_5__lambda_0.3-1.7__navg_11700"
+# First-transition dataset: name -> (folder, file-name glob).  ONE choice sets
+# both, so the subset can never point into a folder that does not hold it.
+# combined_results_4_and_5… holds scan 3 (copied in) and scans 4+5, told apart
+# by the scanner's time stamp in the file name; its own HMM table covers all
+# 41 drives, so "scan3" / "scan45" / "scan345" share one λ axis.  The λ table
+# follows the folder (LAMBDA_SOURCE_POST below).
+_COMBINED_345 = Path(_NEW_SCAN_FOLDER) / "combined_results_4_and_5__lambda_0.3-1.7__navg_11700"
+POST_SELECTED_DATASETS = {
+    "scan3":   (_COMBINED_345, "*_15_10_2026__16_57_51.json"),   # 18 drives
+    "scan45":  (_COMBINED_345, "*_15_10_2026__10_08_55.json"),   # 23 drives
+    "scan345": (_COMBINED_345, "*.json"),                        # all 41
+    # scan 3 in its own folder: its own 18-drive HMM table, + S_pooled_strict
+    "scan3_iterations": (Path(_NEW_SCAN_FOLDER) / "scan_experiment_results_3" / "combined_iterations",
+                         "*.json"),
+    # 3+4+5 with the scan-10 boost merged in (4 boosted drives, 22 Oct stamp)
+    "scan345_boost": (Path(_NEW_SCAN_FOLDER) / "combined_results_3_4_5_and_10_boost", "*.json"),
+    # all iterations of scan 8 merged per point (raw_data_tests/combine_scan8_iterations.py)
+    "scan8": (Path(_NEW_SCAN_FOLDER) / "scan_experiment_results_8" / "combined_iterations", "*.json"),
+}
+POST_SELECTED_DATASET = "scan3"
+POST_SELECTED_FOLDER, POST_SELECTED_FILES = POST_SELECTED_DATASETS[POST_SELECTED_DATASET]
 
 ENS_AVG_FOLDER = Path(r"C:\Users\admin\Weizmann Institute Dropbox\Noam Nezer\Quantum Circuits Lab\Experiments\Zeno\CavityRecAl6\Chip_TransSap46_5\OPX\two_transmons\survival_probability\Omega_BG0_scan\combined_results_0_and_1_merged")
 # ENS_AVG_FOLDER = Path(r"C:\Users\admin\OneDrive - weizmann.ac.il\Msc\Zeno\Code\old_survival_data\scan_experiment_results_50")
@@ -204,8 +228,9 @@ def main() -> None:
         #        source, drop_first_point) is stamped in for the result JSON.
         first_records = load_records(
             PostSelectedLoader(csv_path=LAMBDA_SOURCE_POST), POST_SELECTED_FOLDER,
+            file_glob=POST_SELECTED_FILES,  # files of the folder (POST_SELECTED_DATASET above)
             data_mode="post_selected",      # tag written into the result JSON / file names
-            observables= ["S"],  # keys to load; 1 key → classic MPM, >1 → joint
+            observables= ["S_next_x2"],  # keys to load; 1 key → classic MPM, >1 → joint
                                             # keys to load; 1 key → classic MPM, >1 → joint
                                             #   MPM (common poles, per-observable amplitudes).
                                             #   post_selected: "S" (stored p_0_t_array),
@@ -215,12 +240,19 @@ def main() -> None:
                                             #   "S_pooled_strict" (same pool from segments L > i
                                             #   only: no ring-down last bin; record ends 1 bin
                                             #   earlier; scan 3 combined has it since 25 Oct),
+                                            #   "S_next" (each point from the segment ONE bin
+                                            #   longer only: no ring-down bin, the shots of S,
+                                            #   independent points; computed from the JSON's
+                                            #   first-click histogram), "S_next_far" (segment
+                                            #   i+1+N//2), "S_next_x2" (both: 2x shots, record
+                                            #   ends at ~12.4 us; halves differ ~1e-3 early by
+                                            #   init history — s_next_ringdown_20261026),
                                             #   "S_prev_click" / "S_prev_noclick", X/Y/Z …
                                             #   The MC twin writes only the stored S (its NPZ
                                             #   holds `clicks`, which run_pooled_p0.py does not
                                             #   read), so S_pooled does not exist for it → "S".
             lambda_range=(0, 2),            # λ window to load
-            t_range = (0.6, None),               # (t_min, t_max) µs window the fit sees; None → full
+            t_range = None,               # (t_min, t_max) µs window the fit sees; None → full
                                             #   record, (None, 20) / (2, None) → one-sided.
                                             #   Same mask on the traces AND the bootstrap
                                             #   statistics; poles are window-independent,
@@ -241,6 +273,7 @@ def main() -> None:
         if (FIRST_TOMOGRAPHY := False):
             first_tomo = load_records(
                 PostSelectedLoader(csv_path=LAMBDA_SOURCE_POST), POST_SELECTED_FOLDER,
+                file_glob=POST_SELECTED_FILES,
                 data_mode="post_selected",
                 observables=["S", "X_cond", "Z_cond"],
                 lambda_range=(0, 1.6),
@@ -310,21 +343,44 @@ def main() -> None:
 
             # Step 3 — exceptional point on the pole strands: zero of the pair
             # discriminant Delta = c1² − 4·c0.  Delta is linear in λ through a
-            # sqrt EP, so a line fitted over ±half_width around the sign change
-            # ("linfit") uses every point in the window; "first" takes the
-            # bracketing pair (reads ~0.1 low).  Refitted inside every
-            # bootstrap draw → 16/84 error bar.
+            # sqrt EP.  The bootstrap gives each Delta point its error bar (half
+            # the 16-84 % spread of the draws); ONE line is fitted to the
+            # measured Delta over ±half_width around its sign change ("linfit"),
+            # weighted by those error bars → λ_EP = its zero ± the fit error.
+            # "first" takes the bracketing pair (reads ~0.1 low, no error).
             #   in : first_result (+ first_json to append to)
-            #   out: first_ep — dict: "lambda_ep" (line-fit central value),
-            #                   "delta_crossing_quantiles" [16/50/84], "..._samples"
+            #   out: first_ep — dict: "lambda_ep", "lambda_ep_error" (from the fit),
+            #                   "chi2", "dof", "delta_fit" (the line, for step 6)
             if (FIRST_TRANSITIONS := True):
                 first_ep = run_transitions(
                     first_result, json_path=first_json,
                     method="linfit",        # "linfit" (recommended) | "first"
-                    half_width=0.3,        # λ half-window of the line fit
+                    points_below=3,         # fit points: the 3 λ before Delta turns positive
+                    points_above=2,         #   and the 2 after (None, None → ±half_width)
+                    half_width=0.3,         # λ half-window, used only without points_*
                     lambda_max=None,        # e.g. 1.55 to match the critical-point window
                     plot_discriminant=True, # Delta(λ) with error bars + the fitted line
                 )
+
+                # Step 3c — the EP vs the fit window: steps 1-3 redone for ~6
+                # windows (start t_min, or end t_max, moved), every other
+                # setting taken from first_records / first_result / first_ep.
+                # One figure: Delta(λ) per window, λ_EP ± its fit error in the
+                # legend.
+                #   in : first_records, first_result, first_ep
+                #   out: first_window_sweep — one dict per window (lam_ep, lam_ep_err, …)
+                if (FIRST_WINDOW_SWEEP := True):
+                    first_window_sweep = run_window_sweep(
+                        first_records, first_result, first_ep,
+                        loader=PostSelectedLoader(csv_path=LAMBDA_SOURCE_POST),
+                        vary="t_max",       # "t_min" (move the window start) | "t_max" (its end)
+                        values=None,        # µs, e.g. (0, 0.2, 0.4, 0.6, 0.8, 1.0); None → 6
+                                            #   automatic: the first 6 time samples from the main
+                                            #   window's start ("t_min"), or 6 ends from the record
+                                            #   end down to its middle ("t_max"); at most 8
+                        n_boot=20,         # bootstrap draws PER window (the λ_EP error bar);
+                                            #   the run takes ~6x one step-2 bootstrap of this size
+                    )
 
             # Step 3a — state freezing from the pencil poles (do not conflate
             # with the EP): zero of ksi = (2·Re(e3) − Re(e2)) / (Re(e2) − Re(e3)),
@@ -401,7 +457,8 @@ def main() -> None:
             if (FIRST_SLIDER := True):
                 first_slider = run_slider_plot(
                     first_records, first_result,
-                    scales={"S": "log", "S_pooled": "log", "S_pooled_strict": "log"},   # key → "log"/"linear"
+                    scales={"S": "log", "S_pooled": "log", "S_pooled_strict": "log",
+                            "S_next": "log", "S_next_far": "log", "S_next_x2": "log"},   # key → "log"/"linear"
                     take_abs=False,         # plot/fit |signal| (e.g. for parity)
                 )
 
@@ -767,20 +824,30 @@ def load_records(
     lambda_range: tuple[float, float] | None,
     t_range: tuple[float | None, float | None] | None,
     drop_first_point: bool,
+    file_glob: str = "*.json",
 ) -> list[ObservableRecord]:
     """Step 1 — load the traces.  Returns the records.
 
     One ``ObservableRecord`` per (λ file × observable), sorted by λ then
     observable; ``record.metadata`` carries the bootstrap statistics the
-    loader found, plus the provenance of this load (data mode, folder, λ
-    source, observables, t_range, drop_first_point) that run_mpm writes into
-    the result JSON.  ``t_range = (t_min, t_max)`` in µs keeps only
-    ``t_min <= t <= t_max`` (either end ``None`` → open); ``None`` keeps the
-    full record.  ``MAX_FILES`` (global) caps the number of files.
+    loader found, plus the provenance of this load (data mode, folder, file
+    glob, λ source, observables, t_range, drop_first_point) that run_mpm
+    writes into the result JSON.  ``t_range = (t_min, t_max)`` in µs keeps
+    only ``t_min <= t <= t_max`` (either end ``None`` → open); ``None`` keeps
+    the full record.  ``file_glob`` keeps only the files whose name matches
+    (one source run of a merged folder, POST_SELECTED_SUBSETS).
+    ``MAX_FILES`` (global) caps the number of files.
     """
     folder = Path(folder)
     if not folder.exists():
         raise FileNotFoundError(f"[{data_mode}] folder not found: {folder}")
+    names = [p.name for p in folder.glob("*.json")]
+    if not any(fnmatch.fnmatch(n, file_glob) for n in names):
+        stamps = sorted({m.group(1) for n in names
+                         if (m := re.search(r"_kHz_(.+)\.json$", n))})
+        raise FileNotFoundError(
+            f"[{data_mode}] no file in {folder} matches {file_glob!r}; the file stamps "
+            f"there are {stamps}.  POST_SELECTED_DATASETS pairs each subset with its folder.")
     observables = list(observables)
     if t_range is None:
         t_min = t_max = None
@@ -794,16 +861,19 @@ def load_records(
         observables=observables,
         lambda_range=lambda_range,
         max_files=MAX_FILES,
+        file_glob=file_glob,
         t_min=t_min,
         t_max=t_max,
         drop_first_point=drop_first_point,
     )
     if not records:
         raise RuntimeError(f"[{data_mode}] no records loaded from {folder} "
-                           f"(observables={observables}, lambda_range={lambda_range}).")
+                           f"(files {file_glob}, observables={observables}, "
+                           f"lambda_range={lambda_range}).")
     provenance = {
         "data_mode": data_mode,
         "source_folder": str(folder),
+        "file_glob": file_glob,
         "lambda_source": loader.lambda_source,
         "observables": observables,
         "lambda_range": None if lambda_range is None else [float(x) for x in lambda_range],
@@ -819,7 +889,8 @@ def load_records(
           f"[{lambdas[0]:.3f}, {lambdas[-1]:.3f}], observables={observables}, "
           f"lambda axis = {loader.lambda_source}\n"
           f"  time window t_range={t_range} -> {records[0].n_points} points, "
-          f"t = [{t0:.3f}, {t1:.3f}] us\n  {folder}")
+          f"t = [{t0:.3f}, {t1:.3f}] us\n  {folder}"
+          + ("" if file_glob == "*.json" else f"  (files {file_glob})"))
     return records
 
 
@@ -935,10 +1006,41 @@ def run_mpm(
     the spectrum panels.
     """
     prov = _provenance(records)
-    data_mode, observables = prov["data_mode"], prov["observables"]
-    print(f"\n=== MPM ({data_mode}, observables={observables}, order={order}) ===")
+    print(f"\n=== MPM ({prov['data_mode']}, observables={prov['observables']}, order={order}) ===")
+    pipeline, result = _mpm_pipeline(
+        records, order=order, uncertainty_source=uncertainty_source, n_boot=n_boot,
+        refine_poles=refine_poles, conjugate_pairs=conjugate_pairs, plot_svd=plot_svd,
+        bootstrap_center=bootstrap_center,
+    )
+    _check_pole_ordering(result)
 
-    # MPM → (Refine) → Bootstrap
+    fig, _ = plot_spectrum_panels(result, title=prov["data_mode"])
+    fig.tight_layout()
+    tag_mode, scan_number = _result_tags(result)
+    _show_and_save(fig, "spectrum", data_mode=tag_mode, scan_number=scan_number)
+
+    json_path = None
+    if not DEBUG:
+        json_path = pipeline.save(OUTPUT_DIR, full=SAVE_FULL_ANALYSIS)
+        print(f"Saved: {json_path.name}")
+    return result, json_path
+
+
+def _mpm_pipeline(
+    records: list[ObservableRecord], *,
+    order: int,
+    uncertainty_source: str,
+    n_boot: int,
+    refine_poles: bool,
+    conjugate_pairs: bool,
+    plot_svd: bool,
+    bootstrap_center: str,
+) -> tuple[MPMPipeline, ZenoAnalysisResult]:
+    """MPM → (Refine) → Bootstrap on the records, run (step 2 without its
+    figure and JSON; the window sweep reruns it per window).  Returns
+    ``(pipeline, result)``."""
+    prov = _provenance(records)
+    data_mode, observables = prov["data_mode"], prov["observables"]
     src = _resolve_uncertainty_source(uncertainty_source, data_mode)
     n_boot = min(n_boot, 20) if DEBUG else n_boot
     steps = [
@@ -968,20 +1070,10 @@ def run_mpm(
         metadata["drop_first_point"] = True
     if prov.get("svd_cut") is not None:
         metadata["svd_cut"] = prov["svd_cut"]
+    if prov.get("file_glob", "*.json") != "*.json":
+        metadata["file_glob"] = prov["file_glob"]
     pipeline = MPMPipeline.from_records(records, steps=steps, **metadata)
-    result = pipeline.run()
-    _check_pole_ordering(result)
-
-    fig, _ = plot_spectrum_panels(result, title=data_mode)
-    fig.tight_layout()
-    tag_mode, scan_number = _result_tags(result)
-    _show_and_save(fig, "spectrum", data_mode=tag_mode, scan_number=scan_number)
-
-    json_path = None
-    if not DEBUG:
-        json_path = pipeline.save(OUTPUT_DIR, full=SAVE_FULL_ANALYSIS)
-        print(f"Saved: {json_path.name}")
-    return result, json_path
+    return pipeline, pipeline.run()
 
 
 def run_transitions(
@@ -991,63 +1083,41 @@ def run_transitions(
     half_width: float,
     lambda_max: float | None,
     plot_discriminant: bool,
+    points_below: int | None = None,
+    points_above: int | None = None,
 ) -> dict:
     """Step 3 — the exceptional point on the pole strands, with its error bar.
 
     exceptional pt : lam_EP, zero of the pair discriminant Delta = c1² − 4·c0
 
-    The error is per-realization: the crossing (or the line fit through it)
-    is redone inside every bootstrap draw and the 16/84 spread of those values
-    is the error bar.  The central value comes from the unresampled poles.
-    (State freezing is a separate step: ``run_pole_state_freezing`` /
-    ``run_spiral_state_freezing`` — only the first transition has one.)
+    The bootstrap is used once: at every λ, half the 16-84 % spread of the
+    draws' Delta is that point's error bar.  Then ONE straight line is
+    fitted to the measured Delta around its sign change, weighted by those
+    error bars; λ_EP is the line's zero and its 1-σ error comes from the
+    fit's covariance (error bars taken as absolute; χ²/dof printed beside).
+    No line is fitted to individual draws.  (State freezing is a separate
+    step: ``run_pole_state_freezing`` / ``run_spiral_state_freezing`` — only
+    the first transition has one.)
 
-    Returns ``ep``, a dict with ``"lambda_ep"`` (line-fit central value, NaN
-    if none), ``"delta_crossing_quantiles"`` [16/50/84] and
-    ``"delta_crossing_samples"`` (per draw) when the bootstrap had crossings,
-    ``"delta_crossing_method"``, ``"delta_half_width"``, and ``"delta_fit"``
-    (the central line fit: ``lambda_ep``, ``coef``, ``lambda_window``) that
-    the paper figure draws.  Appended to ``json_path`` (unless DEBUG / None).
+    Returns ``ep``, a dict with ``"lambda_ep"`` (NaN if none),
+    ``"lambda_ep_error"`` (None without bootstrap draws), ``"chi2"``,
+    ``"dof"``, ``"delta_crossing_method"``, ``"delta_half_width"``,
+    ``"delta_lambda_max"`` and ``"delta_fit"`` (the line: ``lambda_ep``,
+    ``coef``, ``lambda_window``) that the paper figure draws.  Appended to
+    ``json_path`` (unless DEBUG / None).
     """
     data_mode, scan_number = _result_tags(result)
     obs_tag = "+".join(_observables(result))
     print(f"\n=== Exceptional point ({data_mode}, {obs_tag}) ===")
 
-    # --- exceptional point: Delta = 0 ---------------------------------------
-    # Delta of the EP pair, followed along λ: past the EP it stays on the two
-    # real poles that continue the pair, not on whichever two are closest.
-    ep: dict = {"delta_crossing_method": method, "delta_half_width": half_width}
-    d_quantiles = d_med = d_lo = d_hi = None
-    raw = result.poles.raw_samples
-    if raw is not None:
-        d_cross, d_med, d_lo, d_hi = discriminant_crossing_samples(
-            raw, lambda_max=lambda_max, method=method, half_width=half_width,
-        )
-        if np.any(np.isfinite(d_cross)):
-            q16, q50, q84 = np.nanpercentile(d_cross, [16, 50, 84])
-            d_quantiles = (q16, q50, q84)
-            ep["delta_crossing_samples"] = d_cross
-            ep["delta_crossing_quantiles"] = [q16, q50, q84]
-        else:
-            print("  EXCEPTIONAL PT  no bootstrap realization had a Delta crossing.")
-    else:
-        print("  EXCEPTIONAL PT  no pole draws stored — the discriminant error bar "
-              "needs a bootstrap/covariance run (n_boot >= 1).")
-
-    lam_d = np.asarray(result.lambda_values, dtype=float)
-    d_central = discriminant_from_poles(_central_poles(result))
-    if lambda_max is not None:
-        m = lam_d <= lambda_max
-        lam_d, d_central = lam_d[m], d_central[m]
-    # Error bar of Delta = half the 16/84 spread of the (artefact-free) draws
-    # (None without them).  The SAME sigma weights the line fit and is drawn
-    # symmetric on the points, so the figure shows what was fitted.
-    has_band = d_med is not None and len(d_med) == len(lam_d)
-    d_sigma = (d_hi - d_lo) / 2 if has_band else None
-    lam_ep, fit = linfit_zero_crossing(lam_d, d_central, sigma=d_sigma,
-                                       half_width=half_width, return_fit=True)
-    first = find_zero_crossings(lam_d, d_central)
-    ep["lambda_ep"] = float(lam_ep)
+    c = _ep_crossing(result, method=method, half_width=half_width, lambda_max=lambda_max,
+                     points_below=points_below, points_above=points_above)
+    lam_d, d_central, d_sigma = c["lam_d"], c["d_central"], c["d_sigma"]
+    lam_ep, err, fit, first = c["lam_ep"], c["lam_ep_err"], c["fit"], c["first"]
+    ep: dict = {"delta_crossing_method": method, "delta_half_width": half_width,
+                "delta_points_below": points_below, "delta_points_above": points_above,
+                "delta_lambda_max": lambda_max, "lambda_ep": float(lam_ep),
+                "lambda_ep_error": err, "chi2": c["chi2"], "dof": c["dof"]}
     # The line itself (coef in the poles' units): the paper figure (step 6)
     # draws this fit, it does not refit.
     ep["delta_fit"] = dict(
@@ -1056,36 +1126,210 @@ def run_transitions(
         lambda_window=(None if fit["coef"] is None else
                        (float(lam_d[fit["window"]].min()), float(lam_d[fit["window"]].max()))),
     )
-    if d_quantiles is not None:
-        q16, q50, q84 = d_quantiles
-        print(f"  EXCEPTIONAL PT  lam_EP     = {lam_ep:.4f} +/- {(q84 - q16) / 2:.4f}   "
-              f"[bootstrap 16/50/84 = {q16:.4f}/{q50:.4f}/{q84:.4f}, "
-              f"{np.mean(np.isnan(ep['delta_crossing_samples'])):.1%} without a crossing]")
-    elif np.isfinite(lam_ep):
-        print(f"  EXCEPTIONAL PT  lam_EP     = {lam_ep:.4f}  (no bootstrap draws — no error bar)")
-    print(f"                  ({'weighted ' if fit.get('weighted') else ''}{method} "
-          "on Delta; raw first sign change at "
-          + (f"{first[0]:.4f})" if first else "none)"))
+
+    if not c["has_draws"]:
+        print("  EXCEPTIONAL PT  no bootstrap draws (n_boot = 0): no error bars on Delta, "
+              "unweighted fit, no error on lam_EP.")
+    if not np.isfinite(lam_ep):
+        print("  EXCEPTIONAL PT  no crossing: the measured Delta has no sign change.")
+    elif err is None:
+        print(f"  EXCEPTIONAL PT  lam_EP     = {lam_ep:.4f}  (no error bar)")
+    else:
+        red = c["chi2"] / c["dof"] if c["dof"] else np.nan
+        print(f"  EXCEPTIONAL PT  lam_EP     = {lam_ep:.4f} +/- {err:.4f}   "
+              f"[weighted line fit to the measured Delta, chi2/dof = {c['chi2']:.2f}/{c['dof']}"
+              + (f" = {red:.2f}; error x sqrt(chi2/dof) = {err * np.sqrt(red):.4f}" if red > 1 else "")
+              + "]")
+    if fit["window"] is not None:
+        wl = lam_d[fit["window"]]
+        n_lo = int(np.sum(wl < lam_ep))
+        rule = (f"fixed: {points_below} before / {points_above} after Delta turns positive"
+                if points_below is not None or points_above is not None
+                else f"+-{half_width}" + (" held fewer than 5" if fit.get("widened") else ""))
+        print(f"                  fit points: lam {', '.join(f'{x:.3f}' for x in wl)}  "
+              f"({n_lo} below / {wl.size - n_lo} above lam_EP; {rule}"
+              + "); raw first sign change at " + (f"{first[0]:.4f}" if first else "none"))
 
     if plot_discriminant:
         ax_d = plot_discriminant_curve(
-            lam_d, d_central, fit=fit, lambda_ep=lam_ep,
-            first_crossing=first[0] if first else None,
-            crossing_quantiles=d_quantiles, delta_sigma=d_sigma,
+            lam_d, d_central, fit=fit, lambda_ep=lam_ep, lambda_ep_sigma=err,
+            first_crossing=first[0] if first else None, delta_sigma=d_sigma,
             title=f"Exceptional point: Delta = 0  ({data_mode}, {obs_tag})",
         )
         _show_and_save(ax_d.get_figure(), "exceptional_point_discriminant",
                        data_mode=data_mode, scan_number=scan_number)
 
-    if json_path is not None and not DEBUG:
-        saved = {k: v for k, v in ep.items()
-                 if k in ("delta_crossing_samples", "delta_crossing_quantiles",
-                          "delta_crossing_method")}
-        if np.isfinite(lam_ep):
-            saved["delta_linfit_central"] = float(lam_ep)
-        if saved:
-            augment_json_with_transitions(json_path, saved)
+    if json_path is not None and not DEBUG and np.isfinite(lam_ep):
+        saved = {"delta_crossing_method": method, "delta_linfit_central": float(lam_ep)}
+        if err is not None:
+            saved.update(delta_linfit_sigma=float(err), delta_linfit_chi2=c["chi2"],
+                         delta_linfit_dof=c["dof"])
+        augment_json_with_transitions(json_path, saved)
     return ep
+
+
+def run_window_sweep(
+    records: list[ObservableRecord],
+    result: ZenoAnalysisResult,
+    ep: dict, *,
+    loader,
+    vary: str,
+    values: tuple[float, ...] | list[float] | None,
+    n_boot: int,
+) -> list[dict]:
+    """Step 3c — the exceptional point vs the fit window.  Returns one dict per window.
+
+    Steps 1-3 are redone for every window, with every setting taken from
+    the main run: the load of ``records`` (folder, file glob, λ range,
+    observables, drop_first_point; the SVD cut's dropped files stay
+    dropped) with the window's t_range, the pencil + bootstrap of
+    ``result`` (order, refinement, uncertainty source, centre; ``n_boot``
+    draws per window) and the Delta line fit of ``ep`` (method, half-width,
+    λ_max).  ``loader`` must be the loader the records came from.
+
+    ``vary="t_min"`` moves the window START over ``values`` (µs) with the end
+    of the main window kept; ``"t_max"`` moves its END with the start kept.
+    ``values=None`` → 6 automatic values: the first 6 time samples from the
+    main window's start (t_min), or 6 ends from the record end down to its
+    middle (t_max).
+
+    Each dict: ``vary``, ``value``, ``t_window`` (first/last sample used),
+    ``n_points`` and the ``_ep_crossing`` numbers (``lam_ep``, ``lam_ep_err``,
+    ``chi2``, ``dof``, ``lam_d``, ``d_central``, ``d_sigma``, ``fit`` …).
+    One figure: Delta(λ) of every window, λ_EP ± its fit error in the legend.
+    """
+    if vary not in ("t_min", "t_max"):
+        raise ValueError(f"vary must be 't_min' or 't_max', got {vary!r}.")
+    prov = _provenance(records)
+    t = np.asarray(records[0].t, dtype=float)
+    t_lo, t_hi = prov["t_range"] or (None, None)
+    if values is None:
+        dt = float(np.median(np.diff(t)))
+        values = (t[0] + dt * np.arange(6) if vary == "t_min"
+                  else np.linspace(t[-1], t[0] + (t[-1] - t[0]) / 2, 6))
+    values = [round(float(v), 6) for v in values]
+    eps = 1e-6                            # µs: a window edge ON a sample keeps it
+
+    # Everything else exactly as in the main run.
+    extras = result.extras or {}
+    settings = dict(
+        order=_order(result),
+        uncertainty_source=result.metadata["uncertainty_source"],
+        refine_poles="refine_conjugate" in extras,
+        conjugate_pairs=bool(extras.get("refine_conjugate", True)),
+        bootstrap_center=result.metadata.get("bootstrap_center", "measured"),
+    )
+    crossing = dict(method=ep["delta_crossing_method"], half_width=ep["delta_half_width"],
+                    lambda_max=ep.get("delta_lambda_max"),
+                    points_below=ep.get("delta_points_below"),
+                    points_above=ep.get("delta_points_above"))
+    svd_cut = prov.get("svd_cut")
+    dropped = {f for d in (svd_cut or {}).get("dropped", []) for f in d["files"]}
+    subset = prov.get("file_glob", "*.json")
+    print(f"\n=== EP vs fit window ({vary} = {values} us; n_boot = {n_boot} per window; "
+          f"{settings}, {crossing}) ===")
+
+    rows = []
+    for v in values:
+        t_range = (v - eps, t_hi) if vary == "t_min" else (t_lo, v + eps)
+        print(f"\n--- window sweep: {vary} = {v:g} us ---")
+        recs = load_records(
+            loader, prov["source_folder"], file_glob=subset,
+            data_mode=prov["data_mode"], observables=prov["observables"],
+            lambda_range=prov["lambda_range"], t_range=t_range,
+            drop_first_point=prov["drop_first_point"],
+        )
+        if svd_cut is not None:
+            recs = [r for r in recs if r.source_file not in dropped]
+            for r in recs:
+                r.metadata[_PROVENANCE] = {**r.metadata[_PROVENANCE], "svd_cut": svd_cut}
+        _, res = _mpm_pipeline(recs, n_boot=n_boot, plot_svd=False, **settings)
+        c = _ep_crossing(res, **crossing)
+        tw = np.asarray(recs[0].t, dtype=float)
+        rows.append(dict(
+            vary=vary, value=v, t_window=(float(tw[0]), float(tw[-1])),
+            n_points=int(recs[0].n_points), **c,
+        ))
+
+    print(f"\n=== EP vs fit window ({vary}): lam_EP = zero of one weighted line fit to "
+          f"the measured Delta, error from the fit ===\n"
+          f"  {'window (us)':>16} {'points':>6} {'lam_EP':>8} {'error':>7} {'chi2/dof':>10}  fit points")
+    for r in rows:
+        err = "" if r["lam_ep_err"] is None else f"{r['lam_ep_err']:7.4f}"
+        chi = "" if r["chi2"] is None else f"{r['chi2']:5.1f}/{r['dof']}"
+        pts = ("" if r["fit"]["window"] is None else
+               ", ".join(f"{x:.3f}" for x in r["lam_d"][r["fit"]["window"]]))
+        print(f"  [{r['t_window'][0]:5.2f}, {r['t_window'][1]:6.2f}] {r['n_points']:6d} "
+              f"{r['lam_ep']:8.4f} {err:>7} {chi:>10}  {pts}")
+
+    for r in rows:
+        a, b = r["t_window"]
+        r["label"] = rf"$t \in [{a:.2f}, {b:.2f}]$ µs"
+    data_mode, scan_number = _result_tags(result)
+    obs_tag = "+".join(_observables(result))
+    sub_tag = "" if subset == "*.json" else f", files {subset}"
+    fig = plot_discriminant_window_sweep(
+        rows, title=f"Exceptional point vs fit window ({data_mode}, {obs_tag}{sub_tag})")
+    _show_and_save(fig, f"discriminant_window_sweep_{vary}",
+                   data_mode=data_mode, scan_number=scan_number)
+    return rows
+
+
+def _ep_crossing(
+    result: ZenoAnalysisResult, *,
+    method: str,
+    half_width: float,
+    lambda_max: float | None,
+    points_below: int | None = None,
+    points_above: int | None = None,
+) -> dict:
+    """Delta(λ) of the EP pair, its error bars and the λ_EP of ONE weighted
+    line fit (the numbers of step 3; the window sweep reuses them per window).
+
+    1. Delta at every λ from the measured (unresampled) poles.  Delta follows
+       the EP pair along λ: past the EP it stays on the two real poles that
+       continue the pair, not on whichever two are closest.
+    2. Its error bar from the bootstrap: half the 16-84 % spread of the
+       draws' Delta at that λ.
+    3. One straight line through the measured Delta around its sign change,
+       weighted 1/σ²; λ_EP = its zero, with the 1-σ error propagated from the
+       fit covariance (error bars absolute) and χ² of the fit.  The points:
+       ``points_below`` / ``points_above`` around the first rise of Delta
+       through zero when given (fixed count, no re-centring), else
+       ±``half_width`` around the sign change (≥ 5 nearest).
+
+    ``method="first"``: λ_EP = the first sign change, no error.  Returns a
+    dict: ``lam_d``, ``d_central``, ``d_sigma`` (None without draws),
+    ``lam_ep``, ``lam_ep_err`` (None without draws), ``chi2``, ``dof``,
+    ``fit`` (window, coef, …), ``first`` (raw sign changes), ``has_draws``.
+    """
+    import warnings
+
+    lam_d = np.asarray(result.lambda_values, dtype=float)
+    d_central = discriminant_from_poles(_central_poles(result))
+    keep = np.ones(lam_d.shape, dtype=bool) if lambda_max is None else lam_d <= lambda_max
+    lam_d, d_central = lam_d[keep], d_central[keep]
+
+    d_sigma = None
+    raw = result.poles.raw_samples
+    if raw is not None:
+        d_draws = discriminant_from_poles(np.asarray(raw.samples))[keep]   # (n_lam, n_boot)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)     # failed draws: NaN
+            lo, hi = np.nanpercentile(d_draws, [16, 84], axis=1)
+        d_sigma = (hi - lo) / 2
+
+    lam_ep, fit = linfit_zero_crossing(lam_d, d_central, sigma=d_sigma,
+                                       half_width=half_width, return_fit=True,
+                                       n_below=points_below, n_above=points_above)
+    first = find_zero_crossings(lam_d, d_central)
+    lam_ep_err = fit.get("sigma_zero")
+    if method == "first":
+        lam_ep, lam_ep_err = (first[0] if first else np.nan), None
+    return dict(lam_d=lam_d, d_central=d_central, d_sigma=d_sigma,
+                lam_ep=float(lam_ep), lam_ep_err=lam_ep_err,
+                chi2=fit.get("chi2"), dof=fit.get("dof"), fit=fit, first=first,
+                has_draws=raw is not None)
 
 
 def _print_state_freezing(tag: str, ksi) -> None:

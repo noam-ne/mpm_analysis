@@ -357,6 +357,40 @@ def _phase_survival(jd: dict) -> np.ndarray:
             / (2 * _navg(jd)))
 
 
+# Survivals computed here from the first-click histogram (no JSON array of
+# their own): one named segment per point, see click_record_npz.HISTOGRAM_SURVIVALS.
+_NEXT_KEYS = ("S_next", "S_next_far", "S_next_x2")
+
+
+def _first_click_histogram(data: dict) -> np.ndarray | None:
+    """``data.p_0_t_pooled_meta.first_click_counts`` (ragged: axis → segment
+    L → slots 0..L) padded to ``(n_axes, n_seg, n_seg + 1)``; None if absent."""
+    hist = (data.get("p_0_t_pooled_meta") or {}).get("first_click_counts")
+    if not hist:
+        return None
+    n_axes, n_seg = len(hist), len(hist[0])
+    counts = np.zeros((n_axes, n_seg, n_seg + 1), dtype=np.int64)
+    for a in range(n_axes):
+        for j, row in enumerate(hist[a]):
+            counts[a, j, :len(row)] = row
+    return counts
+
+
+def _histogram_survival(data: dict, key: str) -> tuple[np.ndarray, np.ndarray]:
+    """``(fraction, attempts)`` of a histogram survival on the file's full time
+    axis (index 0 = t=0 anchor; NaN where the curve has no segment)."""
+    from mpm_analysis.io.experimental.click_record_npz import (
+        HISTOGRAM_SURVIVALS, pooled_survival_from_counts,
+    )
+    counts = _first_click_histogram(data)
+    if counts is None:
+        raise KeyError("p_0_t_pooled_meta.first_click_counts missing (run "
+                       "raw_data_tests/run_pooled_p0.py on this folder)")
+    frac, _, n_att = pooled_survival_from_counts(
+        counts, **HISTOGRAM_SURVIVALS[key](counts.shape[1]))
+    return frac, n_att
+
+
 class PostSelectedLoader(ExperimentalLoader):
     """Load post-selected tomography survival-probability data.
 
@@ -378,6 +412,10 @@ class PostSelectedLoader(ExperimentalLoader):
         ``"S_pooled"``      <- ``data.p_0_t_array_pooled``
         ``"S_pooled_strict"`` <- ``data.p_0_t_array_pooled_strict`` (no
                                segment's own last bin; one point shorter)
+        ``"S_next"``        <- segment L = i + 1 only, from the first-click
+                               histogram (no ring-down bin, shots of S)
+        ``"S_next_far"``    <- segment L = i + 1 + n_seg//2 only
+        ``"S_next_x2"``     <- both (2x shots, half the record)
         ``"SZ"`` / ``"SX"`` <- survival of the z / phase tomography runs
         ``"Z"``, ``"X"``, ``"Y"``  <- SZ·<Z>, SX·<X>, SX·<Y>  (unnormalised
                                Bloch components — the 3x3-generator variables
@@ -414,6 +452,19 @@ class PostSelectedLoader(ExperimentalLoader):
     has no such segment and is stored as ``null``; the loader trims that
     trailing undefined sample, so the record ends one bin earlier.  Same
     histogram, same multinomial bootstrap (``min_extra_bins = 1``).
+
+    ``S_next`` takes each point from ONE named segment instead of a pool:
+    point ``i`` from the segment one bin longer (``L = i + 1``), so no point
+    contains a record-ending bin while every point keeps the stored S's shots
+    and the points stay independent (record ends at ``i = n_seg - 1``).
+    ``S_next_far`` uses ``L = i + 1 + n_seg//2`` and ``S_next_x2`` both —
+    disjoint segment sets, 2x shots, record ending at ``i = n_seg - 1 -
+    n_seg//2``.  The halves follow previous records of different length
+    (initialization history), so check ``S_next`` vs ``S_next_far`` before
+    trusting ``S_next_x2`` (mpm_analysis_output/s_next_ringdown_20261026).
+    All three are computed from ``first_click_counts`` (no JSON array);
+    multinomial data bootstrap as above, and the ``errorbar`` bootstrap gets
+    their binomial sigma (independent points).
     """
 
     def __init__(self, csv_path: str | Path | bool | None = "auto") -> None:
@@ -457,6 +508,11 @@ class PostSelectedLoader(ExperimentalLoader):
             lambda jd, t: np.asarray(
                 jd["data"]["p_0_t_array_pooled_strict"], dtype=float),
         )
+        # One named segment per point, computed from the same histogram (no
+        # JSON array); undefined tail points are NaN, which load() trims.
+        for key in _NEXT_KEYS:
+            self.add_extractor(
+                key, lambda jd, t, key=key: _histogram_survival(jd["data"], key)[0])
         # Tomography channels.  The scan stores the survivor COUNTS per axis
         # pair (z: z/-z, phase: x/-x and y/-y) and the conditional Bloch
         # coordinates on those survivors.  Each axis pair is measured navg
@@ -515,6 +571,12 @@ class PostSelectedLoader(ExperimentalLoader):
         boot = jd["data"].get("p_0_t_bootstrap_meta") or {}
         em = jd["data"].get("p_0_t_errorbar_meta") or {}
         blk = boot.get(key) or em.get(key)
+        if (not blk or blk.get("sigma") is None) and key in _NEXT_KEYS:
+            # one segment per point: independent binomial points (the shot
+            # bootstrap of S equals binomial to 0.5 %); anchor sigma 0
+            frac, n_att = _histogram_survival(jd["data"], key)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                return np.sqrt(frac * (1.0 - frac) / n_att)
         if not blk or blk.get("sigma") is None:
             return None
         return np.asarray(blk["sigma"], dtype=float)
@@ -627,16 +689,17 @@ class PostSelectedLoader(ExperimentalLoader):
                 v, n = v[mask], n[mask]
             out[key] = v
             out[f"N_attempts_{key}"] = n
-        if "S_pooled" in out or "S_pooled_strict" in out:
-            hist = pm.get("first_click_counts")
-            if hist:
-                n_axes, n_seg = len(hist), len(hist[0])
-                counts = np.zeros((n_axes, n_seg, n_seg + 1), dtype=np.int64)
-                for a in range(n_axes):
-                    for j, row in enumerate(hist[a]):
-                        counts[a, j, :len(row)] = row
-                out["pooled_counts"] = counts
-                out["pooled_mask"] = None if mask is None else np.asarray(mask, bool)
+        counts = _first_click_histogram(data)
+        if counts is not None:
+            # the one-segment-per-point curves exist wherever the histogram does
+            for key in _NEXT_KEYS:
+                v, n = _histogram_survival(data, key)
+                if mask is not None:
+                    v, n = v[mask], n[mask]
+                out[key] = v
+                out[f"N_attempts_{key}"] = n
+            out["pooled_counts"] = counts
+            out["pooled_mask"] = None if mask is None else np.asarray(mask, bool)
         return out
 
     def _discover_files(self, folder: Path) -> list[Path]:
