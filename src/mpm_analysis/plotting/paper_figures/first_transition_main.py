@@ -10,7 +10,9 @@ Same style as ``ZenoPlotting/Noams_code/first_transition_plotting.py``
 argument picks the variant:
 
 * ``"sqrt"`` — the 3-panel layout: A full pole spectrum; B/C imaginary and
-  real splitting of the first pair with a square-root overlay.  Delegates to
+  real splitting of the first pair with a square-root overlay, or (with
+  ``panel_c="discriminant"``) C the squared splitting Δ12/(4 Ω_S²) with the
+  Δ12 line.  Delegates to
   :func:`~mpm_analysis.plotting.paper_figures.appendix_bootstrap.plot_appendix_bootstrap`.
   ``splitting_fit="sqrt"`` overlays the critical-point sqrt fit (needs
   ``result.critical_point_sqrt_fit`` — set by the run's critical-point
@@ -39,8 +41,12 @@ def plot_first_transition_figure(
     real_axis_scale: str = "linear",
     real_axis_ticks: list | None = None,
     real_split_axis_ticks: list | None = None,
+    panel_c: str = "real",
+    split_lambda_ticks: list | None = None,
     discriminant_half_width: float = 0.15,
     discriminant_fit: dict | None = None,
+    error_alpha: float = 1.0,
+    crit_line_decimals: int | None = None,
     save_dir: Path | None = None,
     figure_stem: str = "first_transition_main",
 ) -> "plt.Figure":
@@ -66,6 +72,12 @@ def plot_first_transition_figure(
         paper choice).
     real_split_axis_ticks:
         Panel C y-ticks (``"sqrt"`` layout only).
+    panel_c:
+        ``"sqrt"`` layout only: panel C shows ``"real"`` — Re(Δe₁₂)/Ω_S — or
+        ``"discriminant"`` — (Δe₁₂)²/Ω_S² = Δ12/(4 Ω_S²) at every λ with the
+        Δ12 line over its window.
+    split_lambda_ticks:
+        ``"sqrt"`` layout only: λ ticks of panels B and C; ``None`` → every 0.5.
     discriminant_half_width:
         Half-window in λ of the straight-line fit through the Δ12 crossing
         (``"discriminant"`` layout, and ``"sqrt"`` with
@@ -75,6 +87,11 @@ def plot_first_transition_figure(
         ``ep["delta_fit"]``), drawn as it is in either layout instead of
         refitting — the figure then shows exactly that fit and its λ_EP;
         ``discriminant_half_width`` is unused.
+    error_alpha:
+        Opacity of the error bars and caps in all panels; markers stay solid.
+    crit_line_decimals:
+        ``"sqrt"`` layout: draw the vertical λ_EP line at the value rounded
+        to this many decimals (as quoted; 2 → 1.30); ``None`` → unrounded.
     save_dir, figure_stem:
         When given, save SVG + PDF there.
 
@@ -96,6 +113,10 @@ def plot_first_transition_figure(
             real_axis_scale=real_axis_scale,
             real_axis_ticks=real_axis_ticks,
             real_split_axis_ticks=real_split_axis_ticks,
+            panel_c=panel_c,
+            split_lambda_ticks=split_lambda_ticks,
+            error_alpha=error_alpha,
+            crit_line_decimals=crit_line_decimals,
             save_dir=save_dir,
             figure_stem=figure_stem,
         )
@@ -115,6 +136,7 @@ def plot_first_transition_figure(
     from mpm_analysis.plotting.paper_figures.appendix_bootstrap import (
         discriminant_line_fit,
         draw_full_spectrum_panel,
+        fade_error_bars,
     )
 
     omega_s = result.omega_s
@@ -164,7 +186,7 @@ def plot_first_transition_figure(
     draw_full_spectrum_panel(
         ax_real_full, lambdas, r_med, r_lower, r_upper,
         real_axis_scale=real_axis_scale, real_axis_ticks=real_axis_ticks,
-        err_kws=err_kws,
+        err_kws=err_kws, error_alpha=error_alpha,
     )
     plt.setp(ax_real_full.get_xticklabels(), visible=False)
     _add_ep_line(ax_real_full)
@@ -175,12 +197,12 @@ def plot_first_transition_figure(
     )
 
     # --- Panel B: Δ12(λ) with the straight-line fit through the crossing ---
-    ax_delta.errorbar(
+    fade_error_bars(ax_delta.errorbar(
         lambdas, delta, yerr=yerr,
         color="steelblue", marker="o",
         linestyle="none", markersize=MARKER_SIZE,
         **err_kws,
-    )
+    ), error_alpha)
     if dfit["coef"] is not None:
         lo, hi = dfit["lambda_window"]
         lam_line = np.linspace(lo, min(hi, lambda_max), 50)

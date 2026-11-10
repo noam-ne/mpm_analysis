@@ -468,13 +468,21 @@ def pooled_survival_from_counts(
 #                    point (shots of the stored S, independent points)
 #   S_next_far       segment L = i + 1 + n_seg // 2 only (second half)
 #   S_next_x2        both: disjoint halves, 2x shots, record ends at
-#                    i = n_seg - 1 - n_seg // 2
+#                    i = n_seg - 1 - n_seg // 2.  A HALF record (at most
+#                    HALF_RECORD_SEGMENTS segments) has no second half: there
+#                    S_next_x2 is S_next.  Scan 16 is one: 62 segments (to
+#                    12.4 us, time_end 12.6 us) measured with twice the
+#                    repetitions instead of the second half, so its S_next has
+#                    the shots of a full record's S_next_x2 (the old 59-segment
+#                    scan 10 is the only other record this short).
+HALF_RECORD_SEGMENTS = 62
 HISTOGRAM_SURVIVALS = {
     "S_pooled": lambda n_seg: {},
     "S_pooled_strict": lambda n_seg: {"min_extra_bins": 1},
     "S_next": lambda n_seg: {"segment_offsets": (1,)},
     "S_next_far": lambda n_seg: {"segment_offsets": (1 + n_seg // 2,)},
-    "S_next_x2": lambda n_seg: {"segment_offsets": (1, 1 + n_seg // 2)},
+    "S_next_x2": lambda n_seg: {"segment_offsets": (1,) if n_seg <= HALF_RECORD_SEGMENTS
+                                else (1, 1 + n_seg // 2)},
 }
 
 

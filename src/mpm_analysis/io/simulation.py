@@ -11,9 +11,14 @@ Supported formats
     optionally ``Z``, ``theta``.
 
 ``load_monte_carlo_npz``
-    Same format, produced by MC simulation runs.
+    Same format, produced by MC simulation runs — also the (λ × T) grids of
+    ``three_level_tomography.py`` (``lambda_values``, ``T_values``,
+    ``fraction_success_2D`` = no-click trials / attempted trials → "survival").
 
-Both functions accept a ``lambda_range`` filter and an ``observables`` list.
+Both functions accept a ``lambda_range`` filter and an ``observables`` list;
+``load_monte_carlo_npz`` also ``t_range`` (µs window) and ``n_shots`` (attempts behind every point of
+the survival curve → ``metadata["bootstrap_stats"]`` for the data bootstrap,
+drawn as Binomial(n_shots, S(t)) / n_shots like a post_selected survival).
 """
 from __future__ import annotations
 
@@ -25,12 +30,12 @@ from mpm_analysis.data_types.observables import ObservableRecord
 from mpm_analysis.utils.windows_paths import win_long_path
 
 # Keys tried in order when reading the time axis from an NPZ
-_TIME_KEYS = ("time_array_us", "time_array", "t_us", "t")
+_TIME_KEYS = ("time_array_us", "time_array", "t_us", "t", "T_values")
 # Keys tried for lambda values
 _LAMBDA_KEYS = ("lambda_values", "lambdas", "lambda_arr", "alpha_over_2omega")
 # Observable key → list of NPZ key candidates
 _SIGNAL_KEYS: dict[str, list[str]] = {
-    "survival": ["D_probability", "survival", "P_survival", "p0"],
+    "survival": ["D_probability", "survival", "P_survival", "p0", "fraction_success_2D"],
     "Z": ["Z", "s_z", "z_t"],
     "theta": ["theta", "theta_t"],
 }
@@ -69,10 +74,16 @@ def _build_records(
     source_tag: str,
     observables: list[str],
     lambda_range: tuple[float, float] | None,
+    t_range: tuple[float | None, float | None] | None = None,
+    n_shots: int | None = None,
 ) -> list[ObservableRecord]:
     """Common implementation for both analytical and MC NPZ formats."""
     lambdas = _read_lambdas(npz)
     t_us = _read_time(npz)
+    t_min, t_max = (None, None) if t_range is None else t_range
+    t_mask = ((t_us >= (-np.inf if t_min is None else t_min))
+              & (t_us <= (np.inf if t_max is None else t_max)))
+    t_us = t_us[t_mask]
 
     # Load all requested observable arrays — shape (n_lambda, n_time)
     signals: dict[str, np.ndarray] = {}
@@ -91,14 +102,19 @@ def _build_records(
         if lambda_range is not None and not (lambda_range[0] <= lam <= lambda_range[1]):
             continue
         for obs_key, arr in signals.items():
+            signal = arr[i][t_mask]
+            metadata = {"simulation_index": i}
+            if n_shots is not None and obs_key == "survival":
+                metadata["bootstrap_stats"] = {"data_mode": "post_selected",
+                                               "survival": signal, "N_survival": int(n_shots)}
             records.append(
                 ObservableRecord(
                     lambda_val=float(lam),
                     t=t_us,
-                    signal=arr[i],
+                    signal=signal,
                     observable_key=obs_key,
                     source_file=source_tag,
-                    metadata={"simulation_index": i},
+                    metadata=metadata,
                 )
             )
     records.sort(key=lambda r: (r.lambda_val, r.observable_key))
@@ -140,10 +156,16 @@ def load_monte_carlo_npz(
     observables: list[str] | None = None,
     *,
     lambda_range: tuple[float, float] | None = None,
+    t_range: tuple[float | None, float | None] | None = None,
+    n_shots: int | None = None,
 ) -> list[ObservableRecord]:
-    """Load a Monte Carlo simulation NPZ.  Same interface as ``load_analytical_npz``."""
+    """Load a Monte Carlo simulation NPZ.  Same interface as ``load_analytical_npz``,
+    plus ``t_range`` = (t_min, t_max) µs (either end None → open) and ``n_shots`` =
+    the attempted trials behind every point: the "survival" records then carry
+    ``bootstrap_stats`` for the data bootstrap (Binomial(n_shots, S(t)) / n_shots)."""
     if observables is None:
         observables = ["survival"]
     path = Path(path)
     npz = _load_npz(path)
-    return _build_records(npz, path.name, observables, lambda_range)
+    return _build_records(npz, path.name, observables, lambda_range,
+                          t_range=t_range, n_shots=n_shots)

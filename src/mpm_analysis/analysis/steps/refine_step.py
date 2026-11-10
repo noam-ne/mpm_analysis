@@ -105,12 +105,22 @@ class RefineStep(AnalysisStep):
         else:
             keys = list(key)
 
+        by_index = None
         if len(keys) == 1:
             by_lambda = {
                 r.lambda_val: (r.t, r.signal, [r])
                 for r in records
                 if r.observable_key == keys[0]
             }
+            # The slices MPMStep analysed, in its order (records sorted by λ,
+            # stable).  Paired by POSITION, so two records at the same λ (two
+            # scans side by side at one drive) are each refined on their own
+            # data; a λ-keyed lookup would hand both the last record's signal.
+            slices = sorted((r for r in records if r.observable_key == keys[0]),
+                            key=lambda r: r.lambda_val)
+            if len(slices) == len(lambdas) and all(
+                    r.lambda_val == lam for r, lam in zip(slices, lambdas)):
+                by_index = [(r.t, r.signal, [r]) for r in slices]
         else:
             by_lambda = {
                 lam: (t, Y, recs)
@@ -121,7 +131,7 @@ class RefineStep(AnalysisStep):
         refine_params: list[np.ndarray | None] = []
         refine_cov: list[np.ndarray | None] = []
         for i, (lam, poles) in enumerate(zip(lambdas, poles_raw)):
-            group = by_lambda.get(lam)
+            group = by_index[i] if by_index is not None else by_lambda.get(lam)
             if np.any(np.isnan(poles)) or group is None:
                 poles_refined.append(poles)
                 refine_params.append(None)

@@ -297,6 +297,21 @@ def test_run_data_bootstrap_end_to_end_and_center():
     assert poles_result.raw_samples.param_samples is not None
 
 
+def test_n_boot_zero_is_the_measured_fit():
+    """n_boot=0: central = the pencil's poles, zero error bars, no draws."""
+    from mpm_analysis.analysis.steps import MPMStep, BootstrapStep
+    records = [r for r in _synthetic_records() if r.observable_key == "survival"]
+    state = MPMStep(order=3, observable_key=["survival"], plot_svd=False).process(records, {})
+    state = BootstrapStep(n_boot=0, mode="data", n_jobs=1).process(records, state)
+    pr = state["poles_result"]
+    for i, c in enumerate(state["poles_raw"]):
+        assert np.allclose(pr.decay_rates[i], -c.real)
+        assert np.allclose(pr.frequencies[i], c.imag)
+    assert np.all(pr.decay_rates_lower == 0) and np.all(pr.decay_rates_upper == 0)
+    assert np.all(np.isfinite(pr.real_splitting)) and np.all(pr.real_splitting_upper == 0)
+    assert pr.raw_samples is None
+
+
 def test_run_data_bootstrap_reproducible_and_parallel():
     records = _synthetic_records(n_lambda=2, n_t=60)
     kwargs = dict(order=3, n_boot=6, observable_key=["survival", "Z", "X"],
@@ -317,6 +332,77 @@ def test_run_data_bootstrap_requires_stats():
     with pytest.raises(ValueError, match="bootstrap_stats"):
         run_data_bootstrap(records, order=3, n_boot=2,
                            observable_key=["survival", "Z", "X"], n_jobs=1)
+
+
+# ---------------------------------------------------------------------------
+# redraw_around="svd_truncated": copies drawn around the SVD-truncated curve
+# ---------------------------------------------------------------------------
+
+def _noisy_survival_record(n_shots=200_000, seed=3):
+    """One measured survival curve (binomial shot noise, t = 0 anchor at 1)."""
+    t = np.arange(63) * 0.2
+    poles = np.array([-1.2 + 0.19j, -1.2 - 0.19j, -0.25])
+    amps = np.array([-0.28 + 0.85j, -0.28 - 0.85j, 1.56])
+    truth = np.clip(np.real(np.exp(np.outer(t, poles)) @ amps), 1e-6, 1.0)
+    truth[0] = 1.0
+    y = np.random.default_rng(seed).binomial(n_shots, truth) / n_shots
+    stats = {"data_mode": "post_selected", "survival": y, "N_survival": n_shots}
+    rec = ObservableRecord(lambda_val=1.3, t=t, signal=y, observable_key="survival",
+                           metadata={"bootstrap_stats": stats})
+    return rec, truth
+
+
+def test_svd_truncated_signal_keeps_a_noise_free_signal():
+    from mpm_analysis.analysis.matrix_pencil import svd_truncated_signal
+    _, truth = _noisy_survival_record()
+    t = np.arange(63) * 0.2
+    clean = np.real(np.exp(np.outer(t, [-1.2 + 0.19j, -1.2 - 0.19j, -0.25]))
+                    @ np.array([-0.28 + 0.85j, -0.28 - 0.85j, 1.56]))
+    assert np.allclose(svd_truncated_signal(clean, 3, L=25), clean, atol=1e-12)
+
+
+def test_svd_truncated_redraw_is_binomial_around_the_truncated_curve():
+    from mpm_analysis.analysis.bootstrap import (
+        _svd_truncated_stats, bootstrap_svd_truncated_measurements)
+    rec, truth = _noisy_survival_record()
+    st = _svd_truncated_stats(rec.metadata["bootstrap_stats"], "survival",
+                              rec.t, rec.signal, 3, None)
+    S3, n = st["mean"], st["N_attempts"]
+    assert st["anchor"] == 1.0 and np.all(n == 200_000)
+    # the truncated curve sits closer to the truth than the measured curve
+    assert np.std((S3 - truth)[1:]) < np.std((rec.signal - truth)[1:])
+    rng = np.random.default_rng(0)
+    Y = np.vstack([bootstrap_svd_truncated_measurements(st, ["survival"], rng)
+                   for _ in range(3000)])
+    assert np.all(Y[:, 0] == 1.0)                                   # anchor kept
+    sig = np.sqrt(S3 * (1 - S3) / n)
+    assert np.allclose(Y[:, 1:].mean(axis=0), S3[1:], atol=4 * sig[1:].max() / np.sqrt(3000) + 1e-12)
+    ratio = Y[:, 1:].std(axis=0) / sig[1:]
+    assert 0.95 < np.median(ratio) < 1.05                           # one dose, scaled by S3
+
+
+def test_run_data_bootstrap_svd_truncated_end_to_end():
+    from mpm_analysis.analysis.steps import MPMStep, BootstrapStep
+    rec, _ = _noisy_survival_record()
+    state = MPMStep(order=3, observable_key=["survival"], plot_svd=False).process([rec], {})
+    state = BootstrapStep(n_boot=40, mode="data", n_jobs=1, seed=1,
+                          redraw_around="svd_truncated").process([rec], state)
+    pr = state["poles_result"]
+    assert np.isfinite(pr.raw_samples.samples).all()
+    assert np.allclose(pr.decay_rates[0], -state["poles_raw"][0].real)   # centre = measured fit
+    with pytest.raises(ValueError, match="data bootstrap option"):
+        BootstrapStep(n_boot=4, mode="errorbar", redraw_around="svd_truncated")
+
+
+def test_svd_truncated_refuses_pooled_curves():
+    rec, _ = _noisy_survival_record()
+    st = dict(rec.metadata["bootstrap_stats"], S_pooled=rec.signal,
+              N_attempts_S_pooled=np.full(63, 200_000))
+    pooled = ObservableRecord(lambda_val=1.3, t=rec.t, signal=rec.signal,
+                              observable_key="S_pooled", metadata={"bootstrap_stats": st})
+    with pytest.raises(ValueError, match="independent points"):
+        run_data_bootstrap([pooled], order=3, n_boot=2, observable_key="S_pooled",
+                           n_jobs=1, redraw_around="svd_truncated")
 
 
 # ---------------------------------------------------------------------------
@@ -356,6 +442,62 @@ def test_discriminant_crossing_samples():
                        discriminant_from_params(params, 3))
 
 
+def test_linfit_fixed_points_below_and_above():
+    """n_below / n_above: exactly the 3 points up to the last negative one and
+    the 2 after it, whatever the grid spacing; no half-width, no re-centring."""
+    lams = np.array([0.18, 0.36, 0.53, 0.72, 0.86, 1.02, 1.18, 1.33, 1.47, 1.62, 1.78, 1.89])
+    vals = 2.0 * (lams - 1.21)
+    vals[-3:] = [-5.0, 9.0, -7.0]                  # noise far above: never used
+    x, fit = linfit_zero_crossing(lams, vals, half_width=0.01, n_below=3, n_above=2,
+                                  return_fit=True)
+    assert np.allclose(lams[fit["window"]], [0.86, 1.02, 1.18, 1.33, 1.47])
+    assert abs(x - 1.21) < 1e-9 and fit["n_below"] == 3 and fit["n_above"] == 2
+    # crossing near the end: fewer points after it, still a fit
+    x, fit = linfit_zero_crossing(lams[:9], 2.0 * (lams[:9] - 1.40), n_below=3, n_above=2,
+                                  return_fit=True)
+    assert np.allclose(lams[:9][fit["window"]], [1.02, 1.18, 1.33, 1.47])
+    # no rise through zero → NaN
+    assert np.isnan(linfit_zero_crossing(lams, -np.abs(vals) - 1, n_below=3, n_above=2))
+
+
+def test_linfit_fixed_lambda_window():
+    """window=(lo, hi): ONE line through every finite point inside, no seed —
+    a near-zero plateau with sign flips does not move it, points outside are
+    never used; takes precedence over n_below / n_above."""
+    lams = np.array([0.86, 1.02, 1.07, 1.12, 1.18, 1.23, 1.24, 1.28, 1.30, 1.36, 1.42, 1.47, 1.53, 1.62])
+    vals = 2.0 * (lams - 1.27)
+    vals[[4, 5]] = [1e-8, -0.1]                    # a degenerate 0+ before the crossing, then negative
+    vals[[0, -1]] = [40.0, -40.0]                  # outside the window: never used
+    x, fit = linfit_zero_crossing(lams, vals, window=(1.0, 1.5), n_below=3, n_above=2,
+                                  return_fit=True)
+    assert np.allclose(lams[fit["window"]], lams[(lams >= 1.0) & (lams <= 1.5)])
+    assert fit["lambda_range"] == (1.0, 1.5) and 1.25 < x < 1.29
+    s = np.full_like(lams, 0.1)
+    x, fit = linfit_zero_crossing(lams, 2.0 * (lams - 1.27), sigma=s, window=(1.0, 1.5),
+                                  return_fit=True)
+    assert abs(x - 1.27) < 1e-9 and fit["sigma_zero"] > 0 and fit["dof"] == 11 - 2
+    assert np.isnan(linfit_zero_crossing(lams, vals, window=(1.6, 1.61)))   # < 2 points
+
+
+def test_linfit_zero_error_from_the_fit_covariance():
+    """sigma_zero (fit covariance → zero of the line) matches the scatter of
+    the zero over noise realizations drawn with those error bars; chi2/dof ~ 1."""
+    lams = np.linspace(0.8, 1.6, 9)
+    sig = np.where(lams < 1.2, 0.03, 0.3)            # precise below, noisy above
+    rng = np.random.default_rng(3)
+    zeros, sig0, chi = [], [], []
+    for _ in range(2000):
+        vals = 2.0 * (lams - 1.2) + sig * rng.standard_normal(lams.size)
+        x, fit = linfit_zero_crossing(lams, vals, sigma=sig, half_width=1.0, return_fit=True)
+        zeros.append(x)
+        sig0.append(fit["sigma_zero"])
+        chi.append(fit["chi2"] / fit["dof"])
+    assert abs(np.std(zeros) / np.median(sig0) - 1) < 0.1
+    assert abs(np.mean(chi) - 1) < 0.1
+    _, fit = linfit_zero_crossing(lams, 2.0 * (lams - 1.2), half_width=1.0, return_fit=True)
+    assert fit["sigma_zero"] is None and fit["chi2"] is None   # unweighted: no error
+
+
 def test_linfit_zero_crossing_uses_error_bars():
     # straight line through 0.5 with one wild point carrying a huge error bar
     lams = np.linspace(0, 1, 21)
@@ -368,6 +510,23 @@ def test_linfit_zero_crossing_uses_error_bars():
                                          half_width=0.15, return_fit=True)
     assert fit["weighted"] and abs(weighted - 0.5) < 1e-3
     assert abs(unweighted - 0.5) > 0.02
+
+
+def test_linfit_coarse_grid_widens_instead_of_no_crossing():
+    """Scan-3-like grid (0.15 apart): ±0.3 holds 4 points, fewer than the
+    5-point minimum — the fit must widen to the 5 nearest, not return NaN."""
+    lams = np.array([0.18, 0.36, 0.53, 0.72, 0.86, 1.02, 1.18, 1.33, 1.47, 1.62, 1.78, 1.89])
+    vals = 2.0 * (lams - 1.21)
+    x, fit = linfit_zero_crossing(lams, vals, half_width=0.3, return_fit=True)
+    assert abs(x - 1.21) < 1e-9
+    assert fit["widened"] and int(fit["window"].sum()) == 5
+    # a dense grid keeps the ±half_width window as before
+    dense = np.linspace(0.2, 1.9, 35)
+    x, fit = linfit_zero_crossing(dense, 2.0 * (dense - 1.21), half_width=0.3, return_fit=True)
+    assert abs(x - 1.21) < 1e-9 and not fit["widened"] and int(fit["window"].sum()) > 5
+    # no sign change → NaN; fewer finite points than the minimum → NaN
+    assert np.isnan(linfit_zero_crossing(lams, np.abs(vals) + 1.0, half_width=0.3))
+    assert np.isnan(linfit_zero_crossing(lams[:4], vals[:4] + 0.2, half_width=0.3))
 
 
 def test_discriminant_stays_on_ep_pair_past_the_ep():
@@ -494,3 +653,247 @@ def test_pooled_resample_respects_mask_and_anchor():
                                                         rng)[0][0]
                    for _ in range(500)])
     assert abs(ys.mean() - 0.98) < 2e-3
+
+
+
+# ---------------------------------------------------------------------------
+# post_selected: strict pool — segments L > i only (no segment's own last bin)
+# ---------------------------------------------------------------------------
+
+def test_pooled_strict_leaves_out_the_own_last_bin():
+    from mpm_analysis.io.experimental.click_record_npz import pooled_survival_from_counts
+    rec, counts, frac_all, _, _, _ = _pooled_stats()
+    frac, n_succ, n_att = pooled_survival_from_counts(counts, min_extra_bins=1)
+    n_seg = rec.n_segments
+    for i in range(1, n_seg):
+        succ = att = 0
+        for L in range(i + 1, n_seg + 1):
+            seg = rec.segment(L - 1)
+            succ += int((~seg[:, :i].any(axis=1)).sum())
+            att += seg.shape[0]
+        assert n_succ[i] == succ and n_att[i] == att
+    assert n_att[n_seg] == 0 and np.isnan(frac[n_seg]) and frac[0] == 1.0
+    # an excess in each segment's OWN last bin (shots moved from "never
+    # bright" to "first bright at bin L") lowers S_pooled, not the strict pool
+    bumped = counts.copy()
+    for L in range(1, n_seg + 1):
+        k = bumped[:, L - 1, 0] // 10
+        bumped[:, L - 1, 0] -= k
+        bumped[:, L - 1, L] += k
+    assert np.array_equal(pooled_survival_from_counts(bumped, min_extra_bins=1)[0][:-1],
+                          frac[:-1])
+    assert np.all(pooled_survival_from_counts(bumped)[0][1:] < frac_all[1:])
+
+
+def test_segment_offsets_use_exactly_the_named_segments():
+    """(1,) = the segment one bin longer; (1, 1 + n//2) adds its disjoint
+    half-record partner; (0,) = the stored diagonal."""
+    from mpm_analysis.io.experimental.click_record_npz import pooled_survival_from_counts
+    rec, counts, _, _, _, _ = _pooled_stats()
+    n_seg = rec.n_segments
+    per_seg = rec.N                                       # shots per segment
+    for offsets in [(1,), (1, 1 + n_seg // 2), (0,)]:
+        frac, n_succ, n_att = pooled_survival_from_counts(counts, segment_offsets=offsets)
+        i_max = n_seg - max(offsets)
+        for i in range(1, n_seg + 1):
+            if i > i_max:
+                assert n_att[i] == 0 and np.isnan(frac[i])
+                continue
+            succ = sum(int((~rec.segment(i + d - 1)[:, :i].any(axis=1)).sum())
+                       for d in offsets)
+            assert n_succ[i] == succ and n_att[i] == len(offsets) * per_seg
+        assert frac[0] == 1.0
+    # the two halves never share a segment: point i of the second half uses
+    # L = i + 1 + n//2 > every L = i' + 1 of the first half (i' <= i_max)
+    i_max = n_seg - 1 - n_seg // 2
+    assert i_max + 1 < 2 + n_seg // 2
+    # own-last-bin excess leaves the shifted curve untouched
+    bumped = counts.copy()
+    for L in range(1, n_seg + 1):
+        k = bumped[:, L - 1, 0] // 10
+        bumped[:, L - 1, 0] -= k
+        bumped[:, L - 1, L] += k
+    a = pooled_survival_from_counts(counts, segment_offsets=(1,))[0]
+    b = pooled_survival_from_counts(bumped, segment_offsets=(1,))[0]
+    assert np.array_equal(a, b, equal_nan=True)
+    with pytest.raises(ValueError):
+        pooled_survival_from_counts(counts, min_extra_bins=1, segment_offsets=(1,))
+
+
+def _strict_stats():
+    """Stats as the loader builds them for S_pooled + S_pooled_strict
+    (undefined last point trimmed by the mask)."""
+    from mpm_analysis.io.experimental.click_record_npz import pooled_survival_from_counts
+    _, counts, frac, _, n_att, stats = _pooled_stats()
+    q, _, n_q = pooled_survival_from_counts(counts, min_extra_bins=1)
+    mask = np.ones(len(frac), dtype=bool)
+    mask[-1] = False
+    s = dict(stats, S_pooled=frac[mask], N_attempts_S_pooled=n_att[mask],
+             S_pooled_strict=q[mask], N_attempts_S_pooled_strict=n_q[mask],
+             pooled_mask=mask)
+    return counts, mask, n_att, q[mask], n_q[mask], s
+
+
+def test_pooled_strict_resample_moments_and_shared_draw():
+    _, mask, _, q, n_q, stats = _strict_stats()
+    rng = np.random.default_rng(5)
+    n_rep = 3000
+    draws = np.array([
+        bootstrap_post_selected_measurements(stats, ["S_pooled", "S_pooled_strict"], rng)
+        for _ in range(n_rep)
+    ])                                                       # (n_rep, 2, N)
+    P, Q = draws[:, 0], draws[:, 1]
+    assert Q.shape == (n_rep, int(mask.sum())) and np.all(np.isfinite(Q))
+    assert np.allclose(Q[:, 0], 1.0)
+    sig = np.sqrt(q[1:] * (1 - q[1:]) / n_q[1:])            # binomial on the strict attempts
+    assert np.all(np.abs(Q[:, 1:].mean(axis=0) - q[1:]) < 5 * sig / np.sqrt(n_rep))
+    assert np.allclose(Q[:, 1:].var(axis=0), sig ** 2, rtol=0.15)
+    # one histogram draw feeds both curves: at t1 the strict pool is 7 of the
+    # 8 segments of S_pooled → corr = sqrt(7/8); independent draws give 0
+    assert np.corrcoef(P[:, 1], Q[:, 1])[0, 1] > 0.9
+
+
+def test_pooled_resample_unchanged_by_the_strict_option():
+    """S_pooled draws stay what they were: multinomial, re-pool, anchor."""
+    from mpm_analysis.io.experimental.click_record_npz import pooled_survival_from_counts
+    counts, mask, n_att, _, _, stats = _strict_stats()
+    got = bootstrap_post_selected_measurements(stats, ["S_pooled"], np.random.default_rng(11))[0]
+    rng = np.random.default_rng(11)
+    n = counts.sum(-1)
+    draw = rng.multinomial(n.ravel(), (counts / n[..., None]).reshape(-1, counts.shape[-1]))
+    exp = pooled_survival_from_counts(draw.reshape(counts.shape))[0][mask]
+    exp[0] = rng.binomial(int(n_att[0]), 1.0) / n_att[0]
+    assert np.array_equal(got, exp)
+
+
+def _write_post_selected(folder, *, n_seg=8, n_axes=2, n_reps=300, lam=1.0):
+    """One minimal post-selected scan JSON with the pooled + strict write-back."""
+    import json
+    from mpm_analysis.io.experimental.click_record_npz import (
+        ClickRecordData, first_click_counts, pooled_survival_from_counts,
+    )
+    rng = np.random.default_rng(1)
+    lengths = np.arange(1, n_seg + 1)
+    traj = rng.random((n_reps * n_axes, int(lengths.sum()))) < 0.1
+    rec = ClickRecordData(lambda_val=lam, t=np.arange(n_seg + 1) * 0.2, trajectories=traj,
+                          source_file="synthetic", metadata={"n_axes": n_axes},
+                          segment_lengths=lengths)
+    counts = first_click_counts(rec)
+    P, _, nP = pooled_survival_from_counts(counts)
+    Q, _, nQ = pooled_survival_from_counts(counts, min_extra_bins=1)
+    own = np.concatenate(([1.0], counts[:, :, 0].sum(0) / counts.sum(-1).sum(0)))
+    flat = [0.0] * (n_seg + 1)
+    data = {
+        "time_array": (np.arange(n_seg + 1) * 200.0).tolist(),
+        "p_0_t_array": own.tolist(),
+        "phase_axes_number_of_measurements": [100] * (n_seg + 1),
+        "z_axis_number_of_measurements": [100] * (n_seg + 1),
+        "main_phase_axis_array": flat, "orthogonal_phase_axis_array": flat,
+        "z_axis_array": flat,
+        "p_0_t_array_pooled": P.tolist(),
+        "p_0_t_array_pooled_strict": [None if not np.isfinite(v) else float(v) for v in Q],
+        "p_0_t_pooled_meta": {
+            "n_attempts": nP.tolist(),
+            "first_click_counts": [[counts[a, L - 1, :L + 1].tolist() for L in lengths]
+                                   for a in range(n_axes)],
+            "strict": {"min_extra_bins": 1, "n_attempts": nQ.tolist()},
+        },
+    }
+    jd = {"parameters": {"Omega_DG": 628318.53, "lambda_zeno_estimation": lam,
+                         "navg_repeat_experiment": n_reps},
+          "data": data}
+    name = "click_record_with_post_selected_tomography_data__OBG0_1000_kHz_15_10_2026__16_57_51.json"
+    (folder / name).write_text(json.dumps(jd))
+    return P, Q, nP, nQ
+
+
+def test_loader_ends_the_strict_record_one_bin_early(tmp_path):
+    from mpm_analysis.io.experimental import PostSelectedLoader
+    P, Q, _, nQ = _write_post_selected(tmp_path)
+    (rec,) = PostSelectedLoader(csv_path=False).load(tmp_path, observables=["S_pooled_strict"])
+    assert rec.n_points == len(Q) - 1 and np.all(np.isfinite(rec.signal))
+    assert np.allclose(rec.signal, Q[:-1]) and rec.t.size == len(Q) - 1
+    st = rec.metadata["bootstrap_stats"]
+    assert st["pooled_mask"].tolist() == [True] * (len(Q) - 1) + [False]
+    assert np.array_equal(st["N_attempts_S_pooled_strict"], nQ[:-1])
+    y = bootstrap_post_selected_measurements(st, ["S_pooled_strict"],
+                                             np.random.default_rng(0))[0]
+    assert y.shape == (len(Q) - 1,) and np.all(np.isfinite(y))
+    # a joint load shares one time axis; S_pooled alone keeps its last point
+    recs = PostSelectedLoader(csv_path=False).load(
+        tmp_path, observables=["S_pooled", "S_pooled_strict"])
+    assert {r.n_points for r in recs} == {len(Q) - 1}
+    (rp,) = PostSelectedLoader(csv_path=False).load(tmp_path, observables=["S_pooled"])
+    assert rp.n_points == len(P) and rp.metadata["bootstrap_stats"]["pooled_mask"] is None
+
+
+def test_loader_file_glob_selects_one_source_run(tmp_path):
+    """file_glob keeps only the files whose name matches (one run of a merged folder)."""
+    import shutil
+    from mpm_analysis.io.experimental import PostSelectedLoader
+    _write_post_selected(tmp_path)
+    src = next(tmp_path.glob("*.json"))
+    other = tmp_path / src.name.replace("1000_kHz_15_10_2026__16_57_51", "1100_kHz_15_10_2026__10_08_55")
+    shutil.copy(src, other)
+    loader = PostSelectedLoader(csv_path=False)
+    assert len(loader.load(tmp_path, observables=["S"])) == 2
+    (rec,) = loader.load(tmp_path, observables=["S"], file_glob="*_15_10_2026__10_08_55.json")
+    assert rec.source_file.startswith(other.stem)
+    assert loader.load(tmp_path, observables=["S"], file_glob="*_nothing.json") == []
+    # a sequence of globs keeps their union
+    both = loader.load(tmp_path, observables=["S"],
+                       file_glob=("*_15_10_2026__10_08_55.json", "*_nothing.json", src.name))
+    assert len(both) == 2 and {r.source_file.split(".")[0] for r in both} == {src.stem, other.stem}
+
+
+def test_s_next_x2_on_a_half_record(tmp_path, monkeypatch):
+    """A record of at most HALF_RECORD_SEGMENTS segments has no second half:
+    S_next_x2 = S_next there (scan 16); above it, the two halves."""
+    from mpm_analysis.io.experimental import PostSelectedLoader, click_record_npz
+    n_seg, n_axes, n_reps = 8, 2, 300
+    _write_post_selected(tmp_path, n_seg=n_seg, n_axes=n_axes, n_reps=n_reps)
+    loader = PostSelectedLoader(csv_path=False)
+    (nxt,) = loader.load(tmp_path, observables=["S_next"])
+    (x2,) = loader.load(tmp_path, observables=["S_next_x2"])
+    assert n_seg <= click_record_npz.HALF_RECORD_SEGMENTS
+    assert x2.n_points == nxt.n_points and np.array_equal(x2.signal, nxt.signal)
+    assert np.all(x2.metadata["bootstrap_stats"]["N_attempts_S_next_x2"][1:] == n_axes * n_reps)
+    monkeypatch.setattr(click_record_npz, "HALF_RECORD_SEGMENTS", n_seg - 1)   # a full record
+    (x2,) = loader.load(tmp_path, observables=["S_next_x2"])
+    assert x2.n_points == n_seg + 1 - (1 + n_seg // 2)
+    assert np.all(x2.metadata["bootstrap_stats"]["N_attempts_S_next_x2"][1:] == 2 * n_axes * n_reps)
+
+
+def test_loader_s_next_from_the_histogram(tmp_path, monkeypatch):
+    """S_next / S_next_far / S_next_x2: computed from first_click_counts, the
+    undefined tail trimmed, binomial sigma, multinomial draw with independent
+    points."""
+    from mpm_analysis.io.experimental import PostSelectedLoader
+    from mpm_analysis.io.experimental.click_record_npz import pooled_survival_from_counts
+    n_seg, n_axes, n_reps = 8, 2, 300
+    _write_post_selected(tmp_path, n_seg=n_seg, n_axes=n_axes, n_reps=n_reps)
+    loader = PostSelectedLoader(csv_path=False)
+    from mpm_analysis.io.experimental import click_record_npz
+    monkeypatch.setattr(click_record_npz, "HALF_RECORD_SEGMENTS", 0)   # the two-halves definition
+    for key, offsets in [("S_next", (1,)), ("S_next_far", (1 + n_seg // 2,)),
+                         ("S_next_x2", (1, 1 + n_seg // 2))]:
+        (rec,) = loader.load(tmp_path, observables=[key])
+        n_def = n_seg + 1 - max(offsets)              # anchor + defined points
+        assert rec.n_points == n_def and np.all(np.isfinite(rec.signal))
+        assert rec.signal[0] == 1.0
+        st = rec.metadata["bootstrap_stats"]
+        assert np.all(st[f"N_attempts_{key}"][1:] == len(offsets) * n_axes * n_reps)
+        p = rec.signal
+        assert np.allclose(rec.sigma, np.sqrt(p * (1 - p) / st[f"N_attempts_{key}"]))
+        assert st["pooled_counts"].shape == (n_axes, n_seg, n_seg + 1)
+        exp = pooled_survival_from_counts(st["pooled_counts"], segment_offsets=offsets)[0][:n_def]
+        assert np.allclose(p, exp)
+    # data bootstrap: one segment per point -> binomial variance, no correlation
+    (rec,) = loader.load(tmp_path, observables=["S_next"])
+    st = rec.metadata["bootstrap_stats"]
+    rng = np.random.default_rng(7)
+    draws = np.array([bootstrap_post_selected_measurements(st, ["S_next"], rng)[0]
+                      for _ in range(3000)])
+    p, n = rec.signal[1:], st["N_attempts_S_next"][1:]
+    assert np.allclose(draws[:, 1:].var(axis=0), p * (1 - p) / n, rtol=0.15)
+    assert abs(np.corrcoef(draws[:, 1], draws[:, 2])[0, 1]) < 0.1

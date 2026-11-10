@@ -7,8 +7,8 @@ Plotting helpers for the two transitions read off the pole strands:
   Its zero is the **state-freezing point** λ(ξ=0), *not* the exceptional point.
 * ``plot_discriminant_curve`` — Δ(λ) = c1² − 4c0 of the pole pair.  Its zero is
   the **exceptional point** λ_EP.
-* ``plot_discriminant_window_sweep`` — Δ(λ) and its line fit for several fit
-  windows on one figure, λ_EP ± error per window in the legend.
+* ``plot_discriminant_window_sweep`` — Δ(λ) and its line fit for several time
+  windows, one panel per window (2 columns), λ_EP ± error in each panel title.
 
 Both use the paper style of the sqrt-fit figure: measured points with error
 bars, the fit as a black dashed line, the transition as a vertical dashed line
@@ -208,7 +208,11 @@ def plot_discriminant_curve(
     if fit is not None and fit.get("coef") is not None:
         w = fit["window"]
         xs = np.linspace(lam[w].min(), lam[w].max(), 50)
-        if fit.get("n_below") is not None or fit.get("n_above") is not None:
+        if fit.get("lambda_range") is not None:
+            lo, hi = fit["lambda_range"]
+            where = rf"{int(w.sum())} pts in $\lambda$ = {lo:g}-{hi:g}"
+            ax.axvspan(lo, hi, color="#eef1f4", zorder=0, label=rf"fit range $\lambda$ = {lo:g}-{hi:g}")
+        elif fit.get("n_below") is not None or fit.get("n_above") is not None:
             where = (f"{fit.get('n_below') or 0} pts before + {fit.get('n_above') or 0} "
                      r"after $\Delta$ turns positive")
         elif fit.get("widened"):
@@ -260,75 +264,120 @@ def plot_discriminant_curve(
     return ax
 
 
-# High-contrast series for the window sweep, fixed order (never cycled), each
-# with its own marker so a window is never told apart by colour alone.
-_SWEEP_STYLES = [("#2a78d6", "o"), ("#e34948", "s"), ("#008300", "^"), ("#6250d6", "D"),
-                 ("#eb6834", "v"), ("#1baf7a", "P"), ("#d55181", "X"), ("#333333", "*")]
-
-
 def plot_discriminant_window_sweep(curves, *, title: str | None = None):
-    """Delta(λ) and its line fit for several fit windows on one figure.
+    """Delta(λ) and its line fit for several time windows: ONE PANEL PER WINDOW.
 
-    ``curves`` is a list of dicts (one per window, at most 8): ``label``
-    (the window), ``lam_d``, ``d_central``, ``d_sigma`` (or None), ``fit``
-    (``linfit_zero_crossing(..., return_fit=True)``), ``lam_ep`` (zero of the
-    weighted line fit to the measured Delta) and ``lam_ep_err`` (its 1-σ
-    error from the fit, or None).
+    ``curves`` is a list of dicts (one per window): ``label`` (the time
+    window), ``lam_d``, ``d_central``, ``d_sigma`` (or None), ``fit``
+    (``linfit_zero_crossing(..., return_fit=True)``: its point mask
+    ``window``, the line ``coef`` and, with a fixed λ window,
+    ``lambda_range``), ``lam_ep`` / ``lam_ep_err`` (zero of the weighted line
+    and its 1-σ fit error) and ``chi2`` / ``dof`` of the line.
 
-    One panel: the points of every window with their error bars and a line
-    through them, each window's λ_EP as a dashed vertical; the y range
-    follows the complex side and the fit windows (far points with huge
-    error bars run off it).  Legend: the window and λ_EP ± its fit error
-    (the number step 3 prints).
+    Panels on a grid of two columns (four windows → 2 × 2) with shared axes,
+    zoomed on the fit window.  In every panel: the points the line uses
+    (filled, with the σ it was weighted with), the other points (faded), the
+    λ range of the fit (shaded), the line, and λ_EP ± σ (vertical + band).
+    The panel title names the time window and its λ_EP ± σ and χ²/dof; one
+    legend for the whole figure explains the symbols.
 
     Returns the figure.
     """
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
     from mpm_analysis.plotting._style import apply_paper_style
 
-    if len(curves) > len(_SWEEP_STYLES):
-        raise ValueError(f"at most {len(_SWEEP_STYLES)} windows per figure, got {len(curves)}.")
     apply_paper_style()
-    ink = "#222222"
-    fig, ax = plt.subplots(figsize=(10, 6), layout="constrained")
-    ax.axhline(0, color=ink, ls="--", lw=0.8, alpha=0.7)
-    y_lo, y_hi = [], []
-    for k, c in enumerate(curves):
-        col, mk = _SWEEP_STYLES[k]
+    ink, used, other, ep_col, band = "#222222", "#2a78d6", "#a7b0b8", "#d6402f", "#eef1f4"
+    n = len(curves)
+    ncols = 2 if n > 1 else 1
+    nrows = -(-n // ncols)
+    fig, axs = plt.subplots(nrows, ncols, figsize=(6.2 * ncols, 4.3 * nrows), sharex=True,
+                            sharey=True, squeeze=False, layout="constrained")
+
+    # common zoom: the fit's λ range ± 0.35, y from the fitted points and lines
+    ranges, y_vals = [], []
+    for c in curves:
+        fit = c.get("fit") or {}
         lam = np.asarray(c["lam_d"], dtype=float)
         d = np.asarray(c["d_central"], dtype=float)
+        s = np.zeros_like(d) if c.get("d_sigma") is None else np.asarray(c["d_sigma"], dtype=float)
+        w = fit.get("window")
+        if w is None or fit.get("coef") is None:
+            continue
+        ranges.append(fit.get("lambda_range") or (float(lam[w].min()), float(lam[w].max())))
+        ok = w & np.isfinite(d) & np.isfinite(s)
+        y_vals.extend((d[ok] - s[ok]).tolist() + (d[ok] + s[ok]).tolist())
+    x_lo = (min(r[0] for r in ranges) - 0.35) if ranges else None
+    x_hi = (max(r[1] for r in ranges) + 0.35) if ranges else None
+    if y_vals:
+        y_lo, y_hi = float(np.percentile(y_vals, 3)), float(np.percentile(y_vals, 97))
+        pad = 0.15 * (y_hi - y_lo or 1.0)
+        y_lo, y_hi = min(y_lo, 0.0) - pad, max(y_hi, 0.0) + pad
+
+    for k, (ax, c) in enumerate(zip(axs.ravel(), curves)):
+        lam = np.asarray(c["lam_d"], dtype=float)
+        d = np.asarray(c["d_central"], dtype=float)
+        s = c.get("d_sigma")
+        s = None if s is None else np.asarray(s, dtype=float)
+        fit = c.get("fit") or {}
+        w = fit.get("window")
+        w = np.zeros(lam.shape, dtype=bool) if w is None else np.asarray(w, dtype=bool)
+        if fit.get("coef") is not None:
+            lo, hi = fit.get("lambda_range") or (float(lam[w].min()), float(lam[w].max()))
+            ax.axvspan(lo, hi, color=band, zorder=0)
+        ax.axhline(0, color=ink, lw=0.8, alpha=0.7, zorder=1)
+        ax.errorbar(lam[~w], d[~w], yerr=None if s is None else s[~w], color=other, marker="o",
+                    ms=4, linestyle="none", elinewidth=0.8, capsize=0, alpha=0.8, zorder=2)
+        ax.errorbar(lam[w], d[w], yerr=None if s is None else s[w], color=used, marker="o", ms=5,
+                    linestyle="none", elinewidth=1.0, capsize=2, zorder=4)
+        if fit.get("coef") is not None:
+            xs = np.linspace(lo, hi, 50)
+            ax.plot(xs, np.polyval(fit["coef"], xs), color=ink, ls="--", lw=1.4, zorder=5)
         lam_ep, err = c.get("lam_ep"), c.get("lam_ep_err")
         has_ep = lam_ep is not None and np.isfinite(lam_ep)
-        if not has_ep:
-            ep_txt = "no crossing"
-        elif err is None:
-            ep_txt = rf"$\lambda_{{EP}} = \mathbf{{{lam_ep:.3f}}}$ (no error bar)"
+        rng_c = fit.get("lambda_range")
+        if has_ep and rng_c is not None and not rng_c[0] <= lam_ep <= rng_c[1]:
+            # the line's zero is an extrapolation outside the fitted λ range
+            has_ep = False
+            ep_txt = rf"no crossing in the fit range (line zero at {lam_ep:.2f})"
+        elif has_ep:
+            if err is not None and np.isfinite(err):
+                ax.axvspan(lam_ep - err, lam_ep + err, color=ep_col, alpha=0.15, lw=0, zorder=1)
+            ax.axvline(lam_ep, color=ep_col, lw=1.4, zorder=3)
+            ep_txt = rf"$\lambda_{{EP}} = {lam_ep:.3f}$" + (
+                rf"$\,\pm\,{err:.3f}$" if err is not None and np.isfinite(err) else " (no error bar)")
+            if c.get("chi2") is not None and c.get("dof"):
+                ep_txt += rf",  $\chi^2$/dof = {c['chi2']:.1f}/{c['dof']}"
         else:
-            ep_txt = rf"$\lambda_{{EP}} = \mathbf{{{lam_ep:.3f} \pm {err:.3f}}}$"
-        fin = np.isfinite(d)
-        # the curve through the points, then the points with their error bars
-        ax.plot(lam[fin], d[fin], color=col, lw=1.6, alpha=0.8, zorder=4)
-        ax.errorbar(lam, d, yerr=c.get("d_sigma"), color=col, marker=mk, ms=5,
-                    linestyle="none", elinewidth=0.9, capsize=2, alpha=0.9, zorder=5,
-                    label=f"{c['label']}:  {ep_txt}")
-        if fin.any():
-            y_lo.append(np.min(d[fin]))
-        fit = c.get("fit") or {}
-        if fit.get("coef") is not None:
-            # the fit (not drawn) sets the range, not single far points of its window
-            w = fit["window"]
-            xs = np.linspace(lam[w].min(), lam[w].max(), 50)
-            y_hi.extend([np.polyval(fit["coef"], xs).max(), np.nanpercentile(d[w], 75)])
-        if has_ep:
-            ax.axvline(lam_ep, color=col, ls="--", lw=1.1, alpha=0.8, zorder=1)
+            ep_txt = "no crossing in the fit window"
+        ax.set_title(f"{c['label']}\n{ep_txt}", color=ink, fontsize=10)
+        if x_lo is not None:
+            ax.set_xlim(x_lo, x_hi)
+        if y_vals:
+            ax.set_ylim(y_lo, y_hi)
+        ax.grid(True, alpha=0.25, lw=0.5)
+        if k // ncols == nrows - 1 or k + ncols >= n:
+            ax.set_xlabel(r"$\lambda$", color=ink)
+        if k % ncols == 0:
+            ax.set_ylabel(r"$\Delta(\lambda) = c_1^2 - 4c_0$", color=ink)
+    for ax in axs.ravel()[n:]:
+        ax.set_visible(False)
 
-    lo = min(y_lo) if y_lo else -1.0
-    hi = max(y_hi) if y_hi else abs(lo)
-    lo, hi = min(lo, -0.05 * abs(hi)), max(hi, 0.05 * abs(lo))
-    ax.set_ylim(lo - 0.3 * (hi - lo), hi + 0.3 * (hi - lo))
-    ax.set_xlabel(r"$\lambda$", color=ink)
-    ax.set_ylabel(r"$\Delta(\lambda) = c_1^2 - 4c_0$", color=ink)
-    ax.set_title(title or "Exceptional point vs fit window", color=ink)
-    ax.legend(loc="upper left", fontsize=9, framealpha=0.9)
-    ax.grid(True, alpha=0.25, lw=0.5)
+    rng = ranges[0] if ranges else None
+    handles = [
+        Line2D([], [], color=used, marker="o", ls="none", ms=5,
+               label=r"$\Delta \pm \sigma$ used by the line"),
+        Line2D([], [], color=other, marker="o", ls="none", ms=4, label="outside the fit range"),
+        Patch(color=band, label=(rf"fit range $\lambda$ = {rng[0]:g}-{rng[1]:g}" if rng else "fit range")),
+        Line2D([], [], color=ink, ls="--", lw=1.4, label=r"weighted line fit (1/$\sigma^2$)"),
+        Line2D([], [], color=ep_col, lw=1.4, label=r"$\lambda_{EP}$ = its zero, band $\pm\sigma$"),
+    ]
+    fig.suptitle(title or "Exceptional point vs fit window", color=ink)
+    try:
+        fig.legend(handles=handles, loc="outside lower center", ncols=len(handles), fontsize=9,
+                   frameon=False)
+    except (TypeError, ValueError):          # matplotlib without "outside" legends
+        axs.ravel()[0].legend(handles=handles, loc="upper left", fontsize=8, framealpha=0.9)
     return fig

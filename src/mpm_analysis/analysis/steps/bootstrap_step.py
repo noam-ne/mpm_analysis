@@ -55,6 +55,15 @@ class BootstrapStep(AnalysisStep):
         the clean poles without rerunning the pencil — required on a
         non-uniform time axis (see ``run_data_bootstrap``).  Needs a
         ``RefineStep`` before this step.
+    redraw_around:
+        ``mode="data"`` only: what each copy is drawn around — ``"measured"``
+        (default, the measured shots) or ``"svd_truncated"`` (the measured
+        curve cut to ``order`` Hankel SVD components: one binomial per point
+        for post_selected, one multinomial over the outcomes for ens_avg;
+        see ``run_data_bootstrap``).
+    drop_aliased:
+        ``True`` (default): draws with a Nyquist-aliased pole are dropped
+        (as ``MPMStep``).  ``False``: kept, like every other draw.
     """
 
     def __init__(
@@ -66,9 +75,18 @@ class BootstrapStep(AnalysisStep):
         n_jobs: int = -1,
         pencil: bool = True,
         center: str = "measured",
+        redraw_around: str = "measured",
+        drop_aliased: bool = True,
     ) -> None:
         if mode not in ("data", "errorbar", "residual", "parametric"):
             raise ValueError(f"BootstrapStep: unknown mode '{mode}'.")
+        if redraw_around not in ("measured", "svd_truncated"):
+            raise ValueError(f"BootstrapStep: unknown redraw_around '{redraw_around}'.")
+        if redraw_around != "measured" and mode != "data":
+            raise ValueError("BootstrapStep: redraw_around='svd_truncated' is a data "
+                             "bootstrap option (mode='data', uncertainty_source='data_bootstrap').")
+        self.redraw_around = redraw_around
+        self.drop_aliased = drop_aliased
         if not pencil and mode not in ("data", "errorbar"):
             raise ValueError(
                 "BootstrapStep: pencil=False (refine-only draws) is only "
@@ -143,6 +161,8 @@ class BootstrapStep(AnalysisStep):
                 n_jobs=self.n_jobs,
                 pencil=self.pencil,
                 resampler="counts" if self.mode == "data" else "errorbar",
+                redraw_around=self.redraw_around,
+                drop_aliased=self.drop_aliased,
             )
         else:
             # Pass the per-slice pencil parameters, not a single representative:
@@ -156,6 +176,7 @@ class BootstrapStep(AnalysisStep):
                 L_used=state.get("L_used"),
                 rng=rng,
                 clean_poles=state.get("poles_raw"),
+                drop_aliased=self.drop_aliased,
             )
         # center="measured": central values = fit of the ORIGINAL measured
         # dataset, draws only set the uncertainty intervals.
@@ -230,4 +251,7 @@ class BootstrapStep(AnalysisStep):
 
     def description(self) -> str:
         return (f"BootstrapStep(n_boot={self.n_boot}, seed={self.seed}, "
-                f"mode={self.mode}, n_jobs={self.n_jobs}, pencil={self.pencil})")
+                f"mode={self.mode}, n_jobs={self.n_jobs}, pencil={self.pencil}"
+                + (f", redraw_around={self.redraw_around}" if self.redraw_around != "measured" else "")
+                + ("" if self.drop_aliased else ", drop_aliased=False")
+                + ")")

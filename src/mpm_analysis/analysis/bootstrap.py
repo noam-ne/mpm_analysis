@@ -50,6 +50,7 @@ def run_bootstrap(
     L_used: "list[int] | None" = None,
     rng: np.random.Generator | None = None,
     clean_poles: "list[np.ndarray] | None" = None,
+    drop_aliased: bool = True,
 ) -> list[_LambdaBootstrapResult]:
     """Run bootstrap pole extraction for each lambda slice.
 
@@ -89,6 +90,9 @@ def run_bootstrap(
         so bootstrap indices mean the same poles.  Per-draw refits remain plain MPM (a
         nonlinear refinement per draw would multiply runtime ~100×); the
         refined model only shapes the residual pool and the branch labels.
+    drop_aliased:
+        ``True`` (default): a draw with a Nyquist-aliased pole stays NaN.
+        ``False``: it is kept like every other draw.
 
     Returns
     -------
@@ -170,7 +174,7 @@ def run_bootstrap(
                 # a draw with a Nyquist-aliased pole is a sampling artefact
                 # and stays NaN, so it never enters the percentiles.
                 poles_b = sort_poles_canonical(enforce_pole_count(poles_b, order))
-                if aliased_pole_mask(poles_b, dt).any():
+                if drop_aliased and aliased_pole_mask(poles_b, dt).any():
                     continue
                 boot_real[b] = poles_b.real
                 boot_imag[b] = poles_b.imag
@@ -538,10 +542,105 @@ def bootstrap_errorbar_measurements(
     return mean + sigma * rng.standard_normal(mean.shape)
 
 
+def bootstrap_svd_truncated_measurements(
+    stats: dict,
+    keys: list[str],
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """One shot-noise resample around the SVD-truncated curve.
+
+    Every point is drawn as ``Binomial(N_t, S3(t)) / N_t``: the error bar is
+    that of ``S3`` and the noise is added to ``S3``, the measured curve with
+    its Hankel matrix cut to the pencil's order (built per λ by
+    :func:`run_data_bootstrap`, ``redraw_around="svd_truncated"``).  A copy
+    then carries one dose of shot noise, as a repeat of the experiment would,
+    instead of the measured curve's own noise plus one more.  The ``t = 0``
+    anchor (``stats["anchor"]``, 1 by construction) is drawn around its
+    measured value, as in the histogram resample.
+
+    Parameters
+    ----------
+    stats:
+        ``{"mean": (N,) S3, "N_attempts": (N,) shots per point, "anchor":
+        float | None}``.
+    keys:
+        The one observable key (only its number is checked).
+
+    Returns
+    -------
+    np.ndarray
+        Resampled observable, shape ``(1, N)``.
+    """
+    if len(keys) != 1:
+        raise ValueError("bootstrap_svd_truncated_measurements: one observable only.")
+    mean = np.clip(np.asarray(stats["mean"], dtype=float), 0.0, 1.0)
+    n = np.asarray(stats["N_attempts"], dtype=np.int64)
+    safe = n > 0
+    n_safe = np.where(safe, n, 1)
+    draw = np.where(safe, rng.binomial(n_safe, mean) / n_safe, mean)
+    if stats.get("anchor") is not None:
+        draw[0] = rng.binomial(int(n_safe[0]), stats["anchor"]) / int(n_safe[0])
+    return draw[None, :]
+
+
+def _svd_truncated_stats(stats: dict, key: str, t: np.ndarray, y: np.ndarray,
+                         order: int, L: int | None) -> dict:
+    """Statistics of the ``svd_truncated`` redraw for one λ: the measured
+    curve cut to ``order`` SVD components (S3) and the shots it is drawn with.
+
+    * ``post_selected`` — survival curves whose points come from separate
+      shots (one segment per point: ``S``, ``S_next``, ``S_next_far``,
+      ``S_next_x2``, ``SX`` …; the pooled curves share shots between points,
+      and a per-point draw would drop that correlation): ``Binomial(N_t,
+      S3(t))`` per point (:func:`bootstrap_svd_truncated_measurements`), the
+      ``t = 0`` anchor around its measured value.
+    * ``ens_avg`` — one outcome population (``D``, ``G``, ``B`` or
+      ``error``): its row of the measured outcome probabilities becomes S3
+      and the other outcomes share the rest in their measured ratios, so
+      every point stays ONE multinomial over the four outcomes with the
+      file's shots (:func:`bootstrap_ens_avg_measurements`).  ``t = 0`` is a
+      measured point like the others and is drawn around S3(0).
+    """
+    from mpm_analysis.analysis.matrix_pencil import matrix_pencil_method, svd_truncated_signal
+
+    y = np.asarray(y, dtype=float)
+    if stats.get("data_mode") == "ens_avg" and key in stats.get("channels", ()):
+        P = np.clip(np.asarray(stats["P"], dtype=float), 0.0, None)     # (4, N) D/G/B/error
+        if P.shape[1] != y.size:
+            raise ValueError(f"redraw_around='svd_truncated': {P.shape[1]} outcome columns "
+                             f"for {y.size} points of '{key}'.")
+        _, _, L_fit = matrix_pencil_method(t, y, order, L=L)  # the measured fit's pencil size
+        s3 = np.clip(svd_truncated_signal(y, order, L=L_fit), 0.0, 1.0)
+        k = list(stats["channels"]).index(key)
+        others = [i for i in range(P.shape[0]) if i != k]
+        rest = P[others].sum(axis=0)
+        share = np.where(rest > 0, P[others] / np.where(rest > 0, rest, 1.0), 1.0 / len(others))
+        P_new = np.empty_like(P)
+        P_new[k] = s3
+        P_new[others] = share * (1.0 - s3)
+        return {**stats, "P": P_new}
+    if (stats.get("data_mode") != "post_selected" or key not in _POST_SELECTED_SURVIVAL
+            or key in ("S_pooled", "S_pooled_strict")):
+        raise ValueError(
+            f"redraw_around='svd_truncated' needs one post_selected survival curve with "
+            f"independent points (S, S_next, S_next_far, S_next_x2, SX, SZ ...) or one "
+            f"ens_avg population (D, G, B, error), got '{key}' ({stats.get('data_mode')}).")
+    _, n_field = _POST_SELECTED_SURVIVAL[key]
+    n = np.broadcast_to(np.asarray(stats[n_field], dtype=np.int64), y.shape).copy()
+    _, _, L_fit = matrix_pencil_method(t, y, order, L=L)     # the measured fit's pencil size
+    return {
+        "data_mode": "svd_truncated",
+        "mean": svd_truncated_signal(y, order, L=L_fit),
+        "N_attempts": n,
+        "anchor": float(np.clip(y[0], 0.0, 1.0)) if np.isclose(t[0], 0.0) else None,
+    }
+
+
 _MEASUREMENT_RESAMPLERS = {
     "ens_avg": bootstrap_ens_avg_measurements,
     "post_selected": bootstrap_post_selected_measurements,
     "errorbar": bootstrap_errorbar_measurements,
+    "svd_truncated": bootstrap_svd_truncated_measurements,
 }
 
 
@@ -621,7 +720,7 @@ def _data_bootstrap_worker(payload: dict) -> tuple:
                 )
             # Same canonical slot order as the measured fit (pole_sorting).
             poles_b = sort_poles_canonical(poles_b)
-            if aliased_pole_mask(poles_b, dt).any():
+            if payload.get("drop_aliased", True) and aliased_pole_mask(poles_b, dt).any():
                 n_aliased += 1          # Nyquist artefact: row stays NaN
                 continue
             boot_real[b] = poles_b.real
@@ -650,6 +749,8 @@ def run_data_bootstrap(
     n_jobs: int = -1,
     pencil: bool = True,
     resampler: str = "counts",
+    redraw_around: str = "measured",
+    drop_aliased: bool = True,
 ) -> list[_LambdaBootstrapResult]:
     """Data-resampling bootstrap: resample the measurement statistics.
 
@@ -699,6 +800,22 @@ def run_data_bootstrap(
         ``mean + sigma · N(0, 1)`` from its measured per-point error bar
         ``record.sigma`` (see :func:`bootstrap_errorbar_measurements`);
         lambdas whose records carry no sigma are an error.
+    redraw_around:
+        ``resampler="counts"`` only: the curve each copy is drawn around.
+        ``"measured"`` (default): the measured shots themselves, so a copy
+        carries the measured curve's own noise plus one more dose.
+        ``"svd_truncated"``: the measured curve with its Hankel matrix cut to
+        ``order`` SVD components with the measured fit's pencil size (the
+        pencil's own truncation, :func:`svd_truncated_signal`), every point
+        drawn around it — one dose, as in a repeat of the experiment.  One
+        post_selected survival curve with independent points (``S``,
+        ``S_next*`` …; ``Binomial(N_t, S3(t)) / N_t``) or one ens_avg
+        population (``D`` …; the multinomial over the outcomes with that
+        row set to S3), pencil draws only.  The central result is the
+        measured fit either way.
+    drop_aliased:
+        ``True`` (default): a draw with a Nyquist-aliased pole stays NaN
+        (counted in ``n_aliased``).  ``False``: it is kept like every other draw.
 
     Returns
     -------
@@ -710,6 +827,12 @@ def run_data_bootstrap(
     if resampler not in ("counts", "errorbar"):
         raise ValueError(f"run_data_bootstrap: unknown resampler '{resampler}' "
                          "(expected 'counts' or 'errorbar').")
+    if redraw_around not in ("measured", "svd_truncated"):
+        raise ValueError(f"run_data_bootstrap: unknown redraw_around '{redraw_around}' "
+                         "(expected 'measured' or 'svd_truncated').")
+    if redraw_around == "svd_truncated" and (resampler != "counts" or not pencil):
+        raise ValueError("run_data_bootstrap: redraw_around='svd_truncated' needs "
+                         "resampler='counts' and pencil=True.")
     if not pencil and (clean_poles is None or refine_settings is None):
         raise ValueError(
             "run_data_bootstrap(pencil=False) refines every draw from the "
@@ -773,6 +896,11 @@ def run_data_bootstrap(
             L_i = int(L_used[i]) or None
         if L_i is not None and not 1 <= L_i <= N - 1:
             L_i = None
+        if redraw_around == "svd_truncated" and stats is not None:
+            if joint:
+                raise ValueError("run_data_bootstrap: redraw_around='svd_truncated' "
+                                 "takes one observable, not a joint fit.")
+            stats = _svd_truncated_stats(stats, keys[0], t, y, order, L_i)
         cp = None
         if clean_poles is not None and i < len(clean_poles):
             cp = np.asarray(clean_poles[i], dtype=complex)
@@ -780,7 +908,7 @@ def run_data_bootstrap(
             lambda_val=lam, t=t, Y=y, single=not joint, keys=keys,
             stats=stats, order=order, n_boot=n_boot, L=L_i,
             clean_poles=cp, refine_settings=refine_settings,
-            seed_seq=seed_children[i], pencil=pencil,
+            seed_seq=seed_children[i], pencil=pencil, drop_aliased=drop_aliased,
         ))
 
     def _empty():
@@ -1055,8 +1183,10 @@ def aggregate_bootstrap(
 
     return PolesResult(
         decay_rates=decay_med,
-        decay_rates_lower=np.abs(decay_lo),
-        decay_rates_upper=np.abs(decay_hi),
+        # A measured decay rate outside its own 16/84 band: the bar ends at the
+        # point on that side, it is not mirrored past it.
+        decay_rates_lower=np.maximum(decay_lo, 0.0),
+        decay_rates_upper=np.maximum(decay_hi, 0.0),
         frequencies=freq_med,
         frequencies_lower=np.abs(freq_lo),
         frequencies_upper=np.abs(freq_hi),

@@ -20,8 +20,11 @@ def plot_decay_and_freq_panel(
     show_sqrt_fit: bool = True,
     show_critical_line: bool = True,
     annotate_lambda_c: bool = False,
+    discriminant_fit: dict | None = None,
     decay_color: str | None = None,
     freq_color: str | None = None,
+    fit_color: str | None = None,
+    crit_line_x: float | None = None,
     markersize: float | None = None,
     linewidth: float | None = None,
     yticks_freq: list | None = None,
@@ -60,6 +63,22 @@ def plot_decay_and_freq_panel(
         If ``True`` and a fit is present, draw a vertical line at λ_c.
     annotate_lambda_c:
         If ``True``, add a text annotation for λ_c.
+    fit_color:
+        Colour of the dashed fit curve on the frequency axis (sqrt fit or
+        converted discriminant line); ``None`` → the frequency colour.
+    crit_line_x:
+        Draw the vertical critical line at this λ instead of the fit's own
+        value (e.g. the rounded value the text quotes); the curve, the
+        ``keep_all_within`` selection and everything else still use the fit.
+    discriminant_fit:
+        The exceptional-point line of run.py's step 3 (``ep["delta_fit"]``:
+        ``lambda_ep``, ``coef`` of the line Δ(λ) in the poles' units,
+        ``lambda_window``).  When given it REPLACES the sqrt fit: the
+        frequency points are the selected slot's own frequency with its own
+        bars, the dashed curve is √(max(0, −Δ_line))/2 / Ω_S over the line's
+        window (the construction of the appendix figure's panel b) and the
+        vertical line sits at λ_EP, so the main-text figure and the appendix
+        show the same fit and the same critical point.
     yticks_freq:
         Override tick positions on the right (frequency) axis.
     ylim_decay:
@@ -82,6 +101,7 @@ def plot_decay_and_freq_panel(
 
     decay_c = decay_color or AZURE_BLUE
     freq_c  = freq_color  or LAVENDER_BLUE
+    fit_c   = fit_color   or freq_c
     ms = markersize or MARKER_SIZE * 1.5
     lw = linewidth  or LINE_WIDTH
 
@@ -118,9 +138,17 @@ def plot_decay_and_freq_panel(
     f2_lo   = poles_m.frequencies_lower[rows, idx_pol] / omega_s
     f2_err  = poles_m.frequencies_upper[rows, idx_pol] / omega_s
 
-    # Downsample: every n-th point, plus every point within keep_all_within of λ_c
+    # The transition line: λ_EP of the discriminant line when given, else λ_c
+    # of the sqrt fit (None without either).
     sqrt_fit = result.critical_point_sqrt_fit
-    lam_c = sqrt_fit.lambda_c if (keep_all_within is not None and sqrt_fit is not None) else None
+    if discriminant_fit is not None:
+        lc = discriminant_fit["lambda_ep"]
+        lc = float(lc) if lc is not None and np.isfinite(lc) else None
+    else:
+        lc = sqrt_fit.lambda_c if sqrt_fit is not None else None
+
+    # Downsample: every n-th point, plus every point within keep_all_within of the line
+    lam_c = lc if keep_all_within is not None else None
 
     def _keep(x):
         x = np.asarray(x, dtype=float)
@@ -164,9 +192,30 @@ def plot_decay_and_freq_panel(
     if yticks_freq is not None:
         ax_freq.set_yticks(yticks_freq)
 
-    fit = result.critical_point_sqrt_fit if show_sqrt_fit else None
+    fit = result.critical_point_sqrt_fit if (show_sqrt_fit and discriminant_fit is None) else None
 
-    if fit is not None and fit.lambda_data is not None and len(fit.lambda_data) > 0:
+    if discriminant_fit is not None:
+        # Frequency of the selected slot with its own bars; the dashed curve
+        # is the step-3 line converted, √(max(0, −Δ))/2, over the line's window
+        # (λ_EP put on the grid so the curve reaches zero exactly there).
+        ax_freq.errorbar(lam_ds, f2, yerr=[f2_lo, f2_err], color=freq_c, alpha=0.85, **err_kw)
+        coef = discriminant_fit.get("coef")
+        if coef is not None and lc is not None:
+            lo, hi = discriminant_fit["lambda_window"]
+            if lambda_max is not None:
+                hi = min(hi, lambda_max)
+            lam_fit = np.union1d(np.linspace(lo, hi, 500), np.clip([lc], lo, hi))
+            d_fit = np.polyval(coef, lam_fit)
+            imag_fit = np.sqrt(np.clip(-d_fit, 0.0, None)) / 2.0 / omega_s
+            ax_freq.plot(
+                lam_fit, imag_fit,
+                color=fit_c,
+                ls=FIT_LINESTYLE,
+                linewidth=FIT_LINEWIDTH,
+                alpha=1.0,
+                zorder=25,
+            )
+    elif fit is not None and fit.lambda_data is not None and len(fit.lambda_data) > 0:
         # PRIMARY: imaginary splitting data from the sqrt-fit window.
         # imag_split_data and imag_split_err are already normalised by omega_s
         # inside critical_point.fit_sqrt_to_eigenvalues().
@@ -196,7 +245,7 @@ def plot_decay_and_freq_panel(
         if fit.lambda_plot is not None and fit.imag_fit_curve is not None:
             ax_freq.plot(
                 fit.lambda_plot, fit.imag_fit_curve,
-                color=freq_c,
+                color=fit_c,
                 ls=FIT_LINESTYLE,
                 linewidth=FIT_LINEWIDTH,
                 alpha=1.0,
@@ -207,11 +256,11 @@ def plot_decay_and_freq_panel(
         ax_freq.errorbar(lam_ds, f2, yerr=[f2_lo, f2_err], color=freq_c, alpha=0.85, **err_kw)
 
     # -- Critical-point line --
-    if show_critical_line and result.critical_point_sqrt_fit is not None:
-        lc = result.critical_point_sqrt_fit.lambda_c
+    lc_draw = crit_line_x if crit_line_x is not None else lc
+    if show_critical_line and lc_draw is not None:
         for _ax in (ax, ax_freq):
             _ax.axvline(
-                lc,
+                lc_draw,
                 color=LAMBDA_OBS_COLOR,
                 linestyle="--",
                 linewidth=lw,

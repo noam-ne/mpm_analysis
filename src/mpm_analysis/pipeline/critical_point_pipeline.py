@@ -31,6 +31,8 @@ class CriticalPointPipeline:
         ``save()`` knows where to write back.
     lambda_max:
         Optional upper limit on λ — points above this are excluded from the fit.
+    lambda_min:
+        Optional lower limit on λ — points below this are excluded from the fit.
     """
 
     def __init__(
@@ -39,12 +41,18 @@ class CriticalPointPipeline:
         *,
         source_path: Path | None = None,
         lambda_max: float | None = None,
+        lambda_min: float | None = None,
     ) -> None:
         self.result = result
         self.source_path = source_path
 
-        if lambda_max is not None:
-            mask = result.lambda_values <= lambda_max
+        if lambda_max is not None or lambda_min is not None:
+            lam = np.asarray(result.lambda_values, dtype=float)
+            mask = np.ones(lam.shape, dtype=bool)
+            if lambda_max is not None:
+                mask &= lam <= lambda_max
+            if lambda_min is not None:
+                mask &= lam >= lambda_min
             self._poles = result.poles[mask]
             self._lambdas = result.lambda_values[mask]
         else:

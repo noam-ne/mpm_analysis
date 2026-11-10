@@ -23,6 +23,7 @@ def make_third_transition_figure(
     panel_a_fit_result=None,
     panel_a_observable: str = "survival",
     target_lambdas: np.ndarray | None = None,
+    label_fmt: str = r"$\lambda$={:.1f}",
     lambda_max_b: float | None = 1.55,
     downsample_a: int = 2,
     downsample_b: int = 2,
@@ -31,8 +32,11 @@ def make_third_transition_figure(
     transition_label: str | None = "Quantum\nZeno",
     save_dir: Path | None = None,
     figure_stem: str = "third_transition_main_text_figure",
+    yticks_a: list | None = None,
     yticks_freq: list | None = None,
     ylim_decay_b: tuple[float, float] | None = None,
+    discriminant_fit: dict | None = None,
+    crit_line_x: float | None = None,
 ) -> "plt.Figure":
     """Build the two-panel main-text figure.
 
@@ -53,6 +57,8 @@ def make_third_transition_figure(
     target_lambdas:
         Lambda values to select for panel A linecuts.
         Default: ``[0.4, 1.1, 1.5]``.
+    label_fmt:
+        Panel-A legend format, filled with the plotted λ (not the target).
     lambda_max_b:
         Upper λ cutoff for panel B.
     downsample_a, downsample_b:
@@ -71,11 +77,22 @@ def make_third_transition_figure(
         If given, save SVG + PDF to this directory.
     figure_stem:
         Filename stem (no extension).
+    yticks_a:
+        Y-tick positions of panel A; ``None`` → matplotlib's.
     yticks_freq:
         Y-tick positions for the right frequency axis in panel B.
     ylim_decay_b:
         Fixed (bottom, top) of panel B's decay-rate axis (error bars beyond
         it are clipped); ``None`` → autoscale.
+    discriminant_fit:
+        run.py step 3's exceptional-point line (``ep["delta_fit"]``).  When
+        given, panel B's dashed curve is √(max(0, −Δ_line))/2 / Ω_S and the
+        transition line and label sit at λ_EP — the appendix figure's fit —
+        instead of the step-4 sqrt fit (see ``plot_decay_and_freq_panel``).
+    crit_line_x:
+        Draw the transition line and its label at this λ (the value the text
+        quotes, e.g. 1.09) instead of the fit's own value; the dashed curve
+        is unchanged.
 
     Returns
     -------
@@ -112,8 +129,11 @@ def make_third_transition_figure(
         fit_dir=fit_dir,
         fit_result=panel_a_fit_result,
         downsample=downsample_a,
+        label_fmt=label_fmt,
         observable_key=panel_a_observable,
     )
+    if yticks_a is not None:
+        ax_a.set_yticks(yticks_a)
 
     # ---- Panel B ----
     ax_b_decay, ax_b_freq = plot_decay_and_freq_panel(
@@ -127,15 +147,25 @@ def make_third_transition_figure(
         keep_first=keep_first_b,
         show_sqrt_fit=True,
         show_critical_line=True,
+        fit_color="k",                    # dashed fit curve in black, as in the appendix figure
+        crit_line_x=crit_line_x,
         yticks_freq=yticks_freq or [0.0, 0.4, 0.8],
         ylim_decay=ylim_decay_b,
+        discriminant_fit=discriminant_fit,
     )
 
     # ---- "→ Quantum Zeno" beside the transition line ----
-    sqrt_fit = panel_b_result.critical_point_sqrt_fit
-    if transition_label and sqrt_fit is not None:
+    if discriminant_fit is not None:
+        lam_t = discriminant_fit["lambda_ep"]
+        lam_t = float(lam_t) if lam_t is not None and np.isfinite(lam_t) else None
+    else:
+        sqrt_fit = panel_b_result.critical_point_sqrt_fit
+        lam_t = sqrt_fit.lambda_c if sqrt_fit is not None else None
+    if crit_line_x is not None:
+        lam_t = float(crit_line_x)
+    if transition_label and lam_t is not None:
         _add_transition_label(
-            ax_b, sqrt_fit.lambda_c, transition_label,
+            ax_b, lam_t, transition_label,
             LAMBDA_OBS_COLOR, LABELS_FONT_SIZE, LINE_WIDTH,
         )
 
@@ -149,7 +179,7 @@ def make_third_transition_figure(
     # ---- Save ----
     if save_dir is not None:
         from mpm_analysis.utils.windows_paths import save_figure_pdf_svg
-        save_figure_pdf_svg(fig, figure_stem, save_dir)
+        save_figure_pdf_svg(fig, figure_stem, save_dir, png=True)   # PNG = preview beside the vector pair
 
     return fig
 
@@ -162,12 +192,18 @@ def _add_lambda_arrows(ax, lambdas: list[float], colors: list, arrow_lw: float) 
     """Add coloured upward arrows below the x-axis at each plotted lambda."""
     ymin, ymax = ax.get_ylim()
     y_arrow = ymin - 0.04 * (ymax - ymin)
+    # The tip stops at the OUTER edge of the frame line, not at its centre
+    # (y = ymin runs through the middle of the spine): pull it back by half
+    # the spine width, less the rounded tip's own radius so the visible apex
+    # just touches the frame (points).
+    shrink_pt = max(0.5 * ax.spines["bottom"].get_linewidth() - 0.7, 0.0)
     for lam, color in zip(lambdas, colors):
         ax.annotate(
             "",
             xy=(lam, ymin),
             xytext=(lam, y_arrow),
-            arrowprops=dict(arrowstyle="-|>", color=color, lw=arrow_lw),
+            arrowprops=dict(arrowstyle="-|>", color=color, lw=arrow_lw,
+                            shrinkA=0, shrinkB=shrink_pt),
             zorder=20,
             clip_on=False,
         )

@@ -162,8 +162,10 @@ def test_refine_only_bootstrap_on_nonuniform_axis():
                              pencil=False, n_jobs=1, seed=0)
     assert len(out) == 1
     assert np.all(np.isfinite(out[0].boot_real))
-    # Draws scatter around the clean poles
-    assert np.allclose(np.median(out[0].boot_real, axis=0), POLES.real, atol=0.05)
+    # Draws scatter around the clean poles, in the canonical slot order
+    from mpm_analysis.analysis.pole_sorting import sort_poles_canonical
+    assert np.allclose(np.median(out[0].boot_real, axis=0),
+                       sort_poles_canonical(POLES).real, atol=0.05)
 
 
 # ---------------------------------------------------------------------------

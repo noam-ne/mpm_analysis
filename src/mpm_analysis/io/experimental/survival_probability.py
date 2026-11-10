@@ -415,7 +415,8 @@ class PostSelectedLoader(ExperimentalLoader):
         ``"S_next"``        <- segment L = i + 1 only, from the first-click
                                histogram (no ring-down bin, shots of S)
         ``"S_next_far"``    <- segment L = i + 1 + n_seg//2 only
-        ``"S_next_x2"``     <- both (2x shots, half the record)
+        ``"S_next_x2"``     <- both (2x shots, half the record; on a half
+                               record such as scan 16 it is S_next)
         ``"SZ"`` / ``"SX"`` <- survival of the z / phase tomography runs
         ``"Z"``, ``"X"``, ``"Y"``  <- SZ·<Z>, SX·<X>, SX·<Y>  (unnormalised
                                Bloch components — the 3x3-generator variables

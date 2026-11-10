@@ -319,7 +319,7 @@ class ExperimentalLoader(ABC):
         *,
         lambda_range: tuple[float, float] | None = None,
         max_files: int | None = None,
-        file_glob: str | None = None,
+        file_glob: str | tuple[str, ...] | list[str] | None = None,
         t_max: float | None = None,
         t_min: float | None = None,
         drop_first_point: bool = False,
@@ -346,7 +346,8 @@ class ExperimentalLoader(ABC):
         file_glob:
             If given, load only the files whose NAME matches this glob, e.g.
             ``"*_15_10_2026__10_08_55.json"`` — one source run of a folder
-            that merges several.  Default ``None`` loads every file.
+            that merges several; a sequence of globs keeps their union.
+            Default ``None`` loads every file.
         t_max:
             If given, truncate each signal to times ``t <= t_max`` (in µs).
             Default ``None`` loads the full time axis.
@@ -441,7 +442,8 @@ class ExperimentalLoader(ABC):
         folder = Path(folder)
         files = self._discover_files(folder)
         if file_glob is not None:
-            files = [f for f in files if fnmatch.fnmatch(f.name, file_glob)]
+            patterns = (file_glob,) if isinstance(file_glob, str) else tuple(file_glob)
+            files = [f for f in files if any(fnmatch.fnmatch(f.name, p) for p in patterns)]
         if max_files is not None:
             files = files[:max_files]
 

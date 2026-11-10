@@ -200,6 +200,7 @@ def linfit_zero_crossing(
     min_points: int = 5,
     n_below: int | None = None,
     n_above: int | None = None,
+    window: tuple[float, float] | None = None,
 ):
     """Zero of a straight line fitted to ``values`` around its first crossing.
 
@@ -242,6 +243,13 @@ def linfit_zero_crossing(
         and the ``n_above`` points after it (fewer where the curve ends).
         One fit, no re-centring; ``half_width`` / ``n_refits`` /
         ``min_points`` / ``direction`` are then unused.
+    window:
+        Fixed λ window ``(lo, hi)``: ONE line through every finite point with
+        ``lo <= λ <= hi`` — no seed at a sign change, no re-centring (takes
+        precedence over ``n_below`` / ``n_above`` / ``half_width``).  Near a
+        square-root EP Δ(λ) is linear on both sides, so the line uses a
+        near-zero plateau around the crossing instead of tripping on its
+        first sign flip.
 
     Returns
     -------
@@ -280,7 +288,14 @@ def linfit_zero_crossing(
         return (-coef[1] / coef[0] if coef[0] != 0 else np.nan), fit
 
     fit = None
-    if n_below is not None or n_above is not None:
+    if window is not None:
+        # Fixed λ window: every finite point inside it, one weighted fit.
+        w = finite & (lam >= window[0]) & (lam <= window[1])
+        x0 = np.nan
+        if w.sum() >= 2:
+            x0, fit = _fit_window(w, widened=False)
+            fit["lambda_range"] = (float(window[0]), float(window[1]))
+    elif n_below is not None or n_above is not None:
         # Fixed point count around the first rise of the curve through zero:
         # the n_below finite points up to the last one below zero and the
         # n_above after it — no half-width, no re-centring.
@@ -546,7 +561,7 @@ def discriminant_from_params(params: np.ndarray, order: int) -> np.ndarray:
     return c1 * c1 - 4.0 * c0
 
 
-def _ep_pair_delta(P: np.ndarray) -> np.ndarray:
+def _ep_pair_delta(P: np.ndarray, skip_aliased: bool = False) -> np.ndarray:
     """Delta along one λ scan ``P`` of shape (n_lambda, order)."""
     from itertools import permutations
 
@@ -556,13 +571,15 @@ def _ep_pair_delta(P: np.ndarray) -> np.ndarray:
     im = P.imag
     conj = (im[:, I] * im[:, J] < 0) & (np.minimum(np.abs(im[:, I]), np.abs(im[:, J])) > 1e-9)
     # A complex pole without a conjugate partner is aliased (Im = π/dt): that
-    # pole set has lost a branch and has no EP pair.
+    # pole set has lost a branch and has no EP pair — unless skip_aliased, where
+    # the aliased pole is just never one of the pair.
     paired = np.zeros((n, order), dtype=bool)
     for k in range(len(I)):
         paired[:, I[k]] |= conj[:, k]
         paired[:, J[k]] |= conj[:, k]
-    unpaired = ((np.abs(im) > 1e-9) & ~paired).any(axis=1)
-    rows = np.flatnonzero(np.all(np.isfinite(P), axis=1) & ~unpaired)
+    unpaired_pole = (np.abs(im) > 1e-9) & ~paired
+    unpaired = unpaired_pole.any(axis=1)
+    rows = np.flatnonzero(np.all(np.isfinite(P), axis=1) & (skip_aliased | ~unpaired))
     delta = np.full(n, np.nan)
     if len(rows) == 0 or len(I) == 0:
         return delta
@@ -576,6 +593,10 @@ def _ep_pair_delta(P: np.ndarray) -> np.ndarray:
                              for L in rest])
         if conj[r].any():
             cost = np.where(conj[r], cost, np.inf)
+        elif skip_aliased:
+            cost = np.where(unpaired_pole[r, I] | unpaired_pole[r, J], np.inf, cost)
+            if not np.isfinite(cost).any():     # no pair without the aliased pole
+                return ref
         k = int(np.argmin(cost))
         delta[r] = np.real((P[r, I[k]] - P[r, J[k]]) ** 2)
         return P[r, rest[k]]
@@ -592,7 +613,7 @@ def _ep_pair_delta(P: np.ndarray) -> np.ndarray:
     return delta
 
 
-def discriminant_from_poles(poles: np.ndarray) -> np.ndarray:
+def discriminant_from_poles(poles: np.ndarray, *, skip_aliased: bool = False) -> np.ndarray:
     """Discriminant ``Delta = c1**2 - 4*c0 = (s_i - s_j)**2`` of the EP pair.
 
     ``poles`` is a λ scan: complex, shape (n_lambda, order) or
@@ -608,12 +629,15 @@ def discriminant_from_poles(poles: np.ndarray) -> np.ndarray:
     For a conjugate pair ``a ± ib`` Delta is ``-4 b**2``, for two real poles
     their squared distance; same sign convention as
     :func:`discriminant_from_params`.  NaN where a pole is missing or aliased
-    (complex without a conjugate partner, i.e. at Im = π/dt).
+    (complex without a conjugate partner, i.e. at Im = π/dt).  ``skip_aliased``
+    (Nyquist check off): an aliased pole is never one of the pair, and Delta
+    comes from the other poles instead of being NaN.
     """
     P = np.asarray(poles, dtype=complex)
     shape = P.shape[:-1]
     flat = P.reshape(P.shape[0], -1, P.shape[-1])
-    delta = np.stack([_ep_pair_delta(flat[:, k]) for k in range(flat.shape[1])], axis=1)
+    delta = np.stack([_ep_pair_delta(flat[:, k], skip_aliased) for k in range(flat.shape[1])],
+                     axis=1)
     return delta.reshape(shape)
 
 

@@ -107,6 +107,44 @@ def build_stacked_hankel(y: np.ndarray, L: int) -> np.ndarray:
     return np.vstack([build_hankel_matrix(row, L) for row in np.atleast_2d(y)])
 
 
+def svd_truncated_signal(y: np.ndarray, order: int, *, L: int) -> np.ndarray:
+    """The signal ``y`` with its Hankel matrix cut to ``order`` SVD components.
+
+    Builds the pencil's Hankel matrix of ``y`` (pencil parameter ``L``), keeps
+    its ``order`` largest singular components — the truncation the pencil
+    itself makes — and turns the truncated matrix back into a signal by
+    averaging each anti-diagonal (entry ``(r, c)`` holds sample ``r + c``).
+    A noise-free sum of ``order`` exponentials comes back unchanged; on data,
+    what is removed is the part of the noise outside the pencil's signal
+    subspace.
+
+    Parameters
+    ----------
+    y:
+        1-D signal of length N.
+    order:
+        Number of singular components kept (the pencil's model order).
+    L:
+        Pencil parameter of the Hankel matrix (the measured fit's ``L_used``).
+
+    Returns
+    -------
+    np.ndarray
+        The truncated signal, same length as ``y``.
+    """
+    y = np.asarray(y)
+    H = build_hankel_matrix(y, L)
+    U, s, Vh = svd(H, full_matrices=False)
+    H_r = (U[:, :order] * s[:order]) @ Vh[:order]
+    rows, cols = H_r.shape
+    total = np.zeros(len(y), dtype=H_r.dtype)
+    count = np.zeros(len(y))
+    for r in range(rows):
+        total[r: r + cols] += H_r[r]
+        count[r: r + cols] += 1
+    return total / count
+
+
 def matrix_pencil_method(
     t: np.ndarray,
     y: np.ndarray,

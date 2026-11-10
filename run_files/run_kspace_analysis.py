@@ -105,7 +105,7 @@ MIN_ALIVE_FRAC = 0.98
 #     unconditional).  Keys: partial_click / partial_no_click.
 CORR_MODE = "conditional"
 CORR_MAX_CLICKS = None          # only for mode="partial": int >= 0
-CORR_OBSERVABLES = True        # None = both channels of the chosen mode
+CORR_OBSERVABLES = None        # None = both channels of the chosen mode
 CORR_MAX_TIME_US = None        # largest time (us); None = full record
 # Truncate once too few runs are still recorded.  Only ever active for the
 # compressed source, whose per-shot compressed lengths differ.

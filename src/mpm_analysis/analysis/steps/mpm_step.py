@@ -45,6 +45,11 @@ class MPMStep(AnalysisStep):
     save_dir:
         Directory to save the SVD figure as PNG when ``plot_svd=True``.
         ``None`` → do not save.
+    drop_aliased:
+        ``True`` (default): a λ whose pole set has a pole at the Nyquist
+        frequency (``|Im| >= 0.9·π/dt``, ``pole_sorting.aliased_pole_mask``)
+        is blanked — all its poles NaN.  ``False``: every pole is kept, the
+        aliased one included (to look at the full pole set).
     """
 
     def __init__(
@@ -56,6 +61,7 @@ class MPMStep(AnalysisStep):
         plot_svd: bool = False,
         n_sv: int = 10,
         save_dir: Path | str | None = None,
+        drop_aliased: bool = True,
     ) -> None:
         self.order = order
         self.L = L
@@ -63,6 +69,7 @@ class MPMStep(AnalysisStep):
         self.plot_svd = plot_svd
         self.n_sv = n_sv
         self.save_dir = Path(save_dir) if save_dir is not None else None
+        self.drop_aliased = drop_aliased
 
     def process(
         self,
@@ -118,11 +125,13 @@ class MPMStep(AnalysisStep):
                 poles, sv, L_u = matrix_pencil_method(t, Y, self.order, L=self.L)
                 poles = sort_poles_canonical(enforce_pole_count(poles, self.order))
                 dt = float(np.mean(np.diff(t)))
-                if aliased_pole_mask(poles, dt).any():
+                aliased = aliased_pole_mask(poles, dt).any()
+                if aliased:
+                    aliased_lams.append(lam)
+                if aliased and self.drop_aliased:
                     # A pole at the Nyquist frequency of the grid is a
                     # sampling artefact: this pole set is dropped and the
                     # bootstrap's (artefact-free) median stands in for it.
-                    aliased_lams.append(lam)
                     poles = np.full(self.order, np.nan, dtype=complex)
                     amp_shape = self.order if len(keys) == 1 else (len(keys), self.order)
                     amps = np.full(amp_shape, np.nan, dtype=complex)
@@ -175,9 +184,9 @@ class MPMStep(AnalysisStep):
         # cross-λ matching — that swapped labels where the pair coalesces.
         if aliased_lams:
             print(f"  MPMStep: {len(aliased_lams)} pole set(s) at the Nyquist "
-                  f"frequency dropped (lam = "
+                  f"frequency {'dropped' if self.drop_aliased else 'KEPT (Nyquist check off)'} (lam = "
                   + ", ".join(f"{l:.3f}" for l in aliased_lams)
-                  + "); central values there = bootstrap median.")
+                  + ("); central values there = bootstrap median." if self.drop_aliased else ")."))
 
         state["poles_raw"] = poles_raw
         state["amplitudes_raw"] = amplitudes_raw
@@ -190,5 +199,6 @@ class MPMStep(AnalysisStep):
     def description(self) -> str:
         return (
             f"MPMStep(order={self.order}, L={self.L}, "
-            f"obs='{self.observable_key}', plot_svd={self.plot_svd})"
+            f"obs='{self.observable_key}', plot_svd={self.plot_svd}"
+            + ("" if self.drop_aliased else ", drop_aliased=False") + ")"
         )

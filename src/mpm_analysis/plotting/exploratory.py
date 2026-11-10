@@ -139,6 +139,18 @@ def plot_svd_singular_values(
     return ax
 
 
+# One name and colour per exponent (canonical pole slot k) in every pole plot —
+# the spectrum panels and the slider's terms — so e_1 is the same pole everywhere.
+def exponent_color(k: int) -> str:
+    """Colour of exponent slot ``k``: matplotlib's C0, C1, … ."""
+    return f"C{k % 10}"
+
+
+def exponent_label(k: int) -> str:
+    """Legend name of exponent slot ``k``: e_{k+1}."""
+    return rf"$e_{{{k + 1}}}$"
+
+
 def plot_eigenvalue_spectrum(
     result,
     *,
@@ -192,7 +204,8 @@ def plot_eigenvalue_spectrum(
             fmt="o--", markersize=3,
             linewidth=0.8,
             capsize=2,
-            label=f"Pole {k+1}",
+            color=exponent_color(k),
+            label=exponent_label(k),
         )
 
     ax.set_xlabel(r"$\lambda$")
@@ -263,6 +276,7 @@ def plot_time_traces_slider(
     log_scale: bool = True,
     mpm_order: int = 3,
     show_fit: bool = True,
+    components: bool = False,
     fixed_poles: dict[float, np.ndarray] | None = None,
     colors: dict[str, str] | None = None,
 ) -> "Slider":
@@ -303,6 +317,16 @@ def plot_time_traces_slider(
     show_fit:
         If ``True`` (default), overlay the MPM-reconstructed fit on each trace.
         Set to ``False`` to show raw data only.
+    components:
+        If ``True``, draw the fit's exponential terms over each trace instead
+        of their sum, ``Re[A_k exp(p_k t)]`` with the amplitudes solved on that
+        trace (the terms add up to the fit), as curves named and coloured like
+        the spectrum panels: e_1, e_2, … = canonical slots 0, 1, … in C0, C1, …
+        (``exponent_color``); a conjugate pair is one curve, its real sum (a
+        damped cosine), "e_1+e_2" in e_1's colour; the data turn grey.  On a
+        log axis a term is drawn as its magnitude, dashed where it is negative.
+        The y range covers the data and the terms (on a log axis down to at
+        most 3 decades below the data).
     fixed_poles:
         Optional mapping ``lambda -> complex poles``.  When a slider λ is
         present here, the overlay uses these poles (amplitudes re-solved
@@ -329,6 +353,7 @@ def plot_time_traces_slider(
         solve_linear_amplitudes,
         reconstruct_signal,
     )
+    from mpm_analysis.analysis.pole_sorting import sort_poles_canonical
     from mpm_analysis.data_types.observables import group_records_by_lambda
 
     keys = [observable_key] if isinstance(observable_key, str) else list(observable_key)
@@ -346,10 +371,11 @@ def plot_time_traces_slider(
         _, t, Y, _ = groups[idx]
         return t, (np.abs(Y) if take_abs else Y)
 
-    fit_cache: dict[int, np.ndarray | None] = {}
+    fit_cache: dict[int, tuple | None] = {}
 
-    def _get_fit_curves(idx):
-        """Joint MPM fit for slider index: common poles, per-key amplitudes."""
+    def _get_fit(idx):
+        """Joint MPM fit for slider index: (poles, amplitudes (k, M)) — common
+        poles, per-key amplitudes."""
         if idx not in fit_cache:
             lam, t, Y, _ = groups[idx]
             if take_abs:
@@ -357,14 +383,41 @@ def plot_time_traces_slider(
             try:
                 fixed = fixed_poles.get(lam) if fixed_poles is not None else None
                 if fixed is not None and np.all(np.isfinite(fixed)):
-                    poles = np.asarray(fixed, dtype=complex)
+                    poles = np.asarray(fixed, dtype=complex)      # the result's slot order
                 else:
                     poles, _, _ = matrix_pencil_method(t, Y, order=mpm_order)
-                amps = solve_linear_amplitudes(t, Y, poles)
-                fit_cache[idx] = np.atleast_2d(reconstruct_signal(t, poles, amps))
+                    poles = sort_poles_canonical(poles)            # slots as in the result
+                fit_cache[idx] = (poles, np.atleast_2d(solve_linear_amplitudes(t, Y, poles)))
             except Exception:
                 fit_cache[idx] = None
         return fit_cache[idx]
+
+    def _get_fit_curves(idx):
+        """The summed fit per key, shape (k, N), or None."""
+        fit = _get_fit(idx)
+        return None if fit is None else np.atleast_2d(reconstruct_signal(groups[idx][1], *fit))
+
+    def _get_components(idx):
+        """The fit's terms per key: [(slot, legend label, Re[A_k exp(p_k t)])],
+        a conjugate pair as one real term ("e_1+e_2", slot of its first pole);
+        None when the fit failed."""
+        fit = _get_fit(idx)
+        if fit is None:
+            return None
+        poles, amps = fit
+        phi = np.exp(np.outer(groups[idx][1], poles))           # (N, M)
+        terms, used = [], set()
+        for a in range(len(poles)):
+            if a in used or not np.isfinite(poles[a]):
+                continue
+            b = next((b for b in range(a + 1, len(poles)) if b not in used
+                      and abs(poles[a].imag) > 1e-9
+                      and abs(poles[b] - np.conj(poles[a])) <= 2e-2 * (1 + abs(poles[a]))), None)
+            terms.append([a] if b is None else [a, b])
+            used.update(terms[-1])
+        return [[(m[0], "+".join(exponent_label(s) for s in m).replace("$+$", "+"),
+                  np.real(phi[:, m] @ amp[m])) for m in terms]
+                for amp in amps]
 
     def _ylim_for(sig, scale):
         finite = sig[np.isfinite(sig)]
@@ -406,6 +459,9 @@ def plot_time_traces_slider(
         shades = cmap(np.linspace(0.55, 0.9, len(ks))) if len(ks) > 1 else [cmap(0.75)]
         for k, shade in zip(ks, shades):
             key_color[k] = shade
+        if components:      # the terms take C0, C1, … (exponent_color): data in greys
+            for n, k in enumerate(ks):
+                key_color[k] = str(0.15 + 0.3 * (n % 3))
         if colors:
             for k in ks:
                 if k in colors:
@@ -419,9 +475,10 @@ def plot_time_traces_slider(
         axis.spines[spine].set_color(axis_color)
 
     # --- Initial draw ------------------------------------------------------
+    draw_fit = show_fit and not components      # components replace the summed fit
     lam0, _, _, _ = groups[0]
     t0, Y0 = _signals(0)
-    fits0 = _get_fit_curves(0) if show_fit else None
+    fits0 = _get_fit_curves(0) if draw_fit else None
 
     scatter_artists = {}
     fit_lines = {}
@@ -438,32 +495,96 @@ def plot_time_traces_slider(
             fit_x, fit_y,
             color=key_color[k], lw=1.5, linestyle="--", zorder=5,
         )
-        fit_lines[k].set_visible(show_fit)
+        fit_lines[k].set_visible(draw_fit)
+
+    # Component artists per key, made on first use: (solid line, dashed line where < 0)
+    comp_lines: dict[str, list] = {k: [] for k in keys}
+
+    def _comp_artists(k, c):
+        while len(comp_lines[k]) <= c:
+            line, = axes[scale_of[k]].plot([], [], lw=1.6, zorder=4.5)
+            neg, = axes[scale_of[k]].plot([], [], lw=1.6, ls="--", zorder=4)
+            comp_lines[k].append((line, neg))
+        return comp_lines[k][c]
+
+    def _runs(mask):
+        """``mask`` widened by one sample on each side, so the solid and dashed
+        stretches of a term meet instead of leaving gaps."""
+        return mask | np.r_[mask[1:], False] | np.r_[False, mask[:-1]]
+
+    def _draw_components(idx):
+        """Set the component curves of slider index idx; returns the components."""
+        comps = _get_components(idx) if components else None
+        t = groups[idx][1]
+        for i, k in enumerate(keys):
+            items = comps[i] if comps else []
+            for c, (slot, _, y) in enumerate(items):
+                line, neg = _comp_artists(k, c)
+                line.set_color(exponent_color(slot))
+                neg.set_color(exponent_color(slot))
+                if scale_of[k] == "log":     # magnitude, dashed where the term is negative
+                    line.set_data(t, np.where(_runs(y >= 0), np.abs(y), np.nan))
+                    neg.set_data(t, np.where(_runs(y < 0), np.abs(y), np.nan))
+                else:
+                    line.set_data(t, y)
+                    neg.set_data([], [])
+                line.set_visible(True)
+                neg.set_visible(True)
+            for line, neg in comp_lines[k][len(items):]:
+                line.set_visible(False)
+                neg.set_visible(False)
+        return comps
 
     title = ax_host.set_title(f"λ = {lam0:.4f}  (1 / {len(groups)})", fontsize=12)
     ax_host.set_xlabel(r"Time ($\mu$s)", fontsize=11)
     ax_host.grid(True, alpha=0.3, linewidth=0.5)
     ax_host.set_xlim(t0.min(), t0.max())
 
-    def _rescale_axes(t, Y):
+    def _rescale_axes(t, Y, comps=None):
         for sc in axis_scales:
             idxs = [keys.index(k) for k in axis_keys[sc]]
-            lim = _ylim_for(np.concatenate([Y[i] for i in idxs]), sc)
+            data = np.concatenate([Y[i] for i in idxs])
+            lim = _ylim_for(data, sc)
+            if lim and comps:
+                # the range covers the terms too: above (large, cancelling
+                # amplitudes near an EP) and below — on a log axis at most 3
+                # decades below the data, or a fast term would flatten the plot
+                ext = np.concatenate([y for i in idxs for *_, y in comps[i]])
+                ext = np.abs(ext[np.isfinite(ext)]) if sc == "log" else ext[np.isfinite(ext)]
+                if sc == "log":
+                    ext = ext[ext > 0]
+                if ext.size and sc == "log":
+                    lim = (max(min(lim[0], ext.min() * 0.5), lim[0] * 1e-3),
+                           max(lim[1], ext.max() * 2.0))
+                elif ext.size:
+                    lim = _ylim_for(np.concatenate([data, ext]), sc)
             if lim:
                 axes[sc].set_ylim(*lim)
 
-    _rescale_axes(t0, Y0)
+    def _legend(comps=None):
+        # Single legend on the host axis; twin-axis artists are legal there.
+        handles = [scatter_artists[k] for k in keys]
+        legend_labels = [labels.get(k, k) for k in keys]
+        if draw_fit:
+            handles.append(Line2D([], [], color="0.4", lw=1.5, linestyle="--"))
+            legend_labels.append(
+                f"LSQ fit (order {mpm_order})" if fixed_poles
+                else f"MPM fit (order {mpm_order})"
+            )
+        if comps:
+            for i, k in enumerate(keys):
+                for c, (slot, label, _) in enumerate(comps[i]):
+                    handles.append(Line2D([], [], color=exponent_color(slot), lw=1.6))
+                    legend_labels.append(label if len(keys) == 1 else f"{labels.get(k, k)}: {label}")
+            if any(scale_of[k] == "log" and (y < 0).any()
+                   for i, k in enumerate(keys) for *_, y in comps[i]):
+                handles.append(Line2D([], [], color="0.4", lw=1.6, ls="--"))
+                legend_labels.append("< 0")
+        ax_host.legend(handles, legend_labels, fontsize=10)
 
-    # Single legend on the host axis; twin-axis artists are legal there.
-    handles = [scatter_artists[k] for k in keys]
-    legend_labels = [labels.get(k, k) for k in keys]
-    if show_fit:
-        handles.append(Line2D([], [], color="0.4", lw=1.5, linestyle="--"))
-        legend_labels.append(
-            f"LSQ fit (order {mpm_order})" if fixed_poles
-            else f"MPM fit (order {mpm_order})"
-        )
-    ax_host.legend(handles, legend_labels, fontsize=10)
+    comps0 = _draw_components(0)
+    _rescale_axes(t0, Y0, comps0)
+    _legend(comps0)
 
     # fig.add_axes, not plt.axes: never depends on which figure is "current"
     ax_sl = fig.add_axes([0.18, 0.08, 0.64, 0.03])
@@ -473,16 +594,19 @@ def plot_time_traces_slider(
         idx = int(slider.val)
         lam = groups[idx][0]
         t, Y = _signals(idx)
-        fits = _get_fit_curves(idx) if show_fit else None
+        fits = _get_fit_curves(idx) if draw_fit else None
         for i, k in enumerate(keys):
             scatter_artists[k].set_offsets(np.column_stack((t, Y[i])))
-            if show_fit:
+            if draw_fit:
                 if fits is not None:
                     fit_lines[k].set_data(t, fits[i])
                 else:
                     fit_lines[k].set_data([], [])
+        comps = _draw_components(idx)
         ax_host.set_xlim(t.min(), t.max())
-        _rescale_axes(t, Y)
+        _rescale_axes(t, Y, comps)
+        if components:
+            _legend(comps)
         title.set_text(f"λ = {lam:.4f}  ({idx + 1} / {len(groups)})")
         fig.canvas.draw_idle()
 

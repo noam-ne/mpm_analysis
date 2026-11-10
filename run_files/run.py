@@ -23,6 +23,7 @@ functions take keyword-only settings: a misspelt or missing argument is a
     RUN_FIRST_TRANSITION   post-selected survival  (scan 3-8 / 10)   → first transition
     RUN_THIRD_TRANSITION   ensemble-average  D     (scan 0 / 1 / 50)  → third transition
     RUN_MC_TWIN            the first-transition steps on a simulated scan (MC_RUNS)
+    RUN_SIM_GRID           the first-transition steps on a simulated (λ × T) survival grid NPZ
 
 Steps of a transition and what they produce:
 
@@ -41,11 +42,18 @@ Steps of a transition and what they produce:
                                           tomography spiral: ksi = γ0/γa − 1 = 0, no pencil
     4  run_critical_point → sqrt_fit      sqrt fit of the splitting → lambda_c
     5  run_slider_plot    → slider        interactive per-λ trace browser with the fitted poles
+                                          (the summed fit, or each term in its own colour)
     6  run_figure         → fig           paper figure from this run's result
-    7  run_export_figure_data → folder    (third only) result JSON + per-λ fit curves, a
-                                          self-contained snapshot of the figure inputs
-                                          (make_third_transition_figure.py reads third_json
-                                          and its data folder directly; it does not need this)
+    7  run_export_figure_data → folder    per-λ fit curves in a NEW fitting_results_<stamp> folder.
+                                          third: + the result JSON, a self-contained snapshot of
+                                          the figure inputs (make_third_transition_figure.py reads
+                                          third_json and its data folder directly; it does not
+                                          need this).  first: the S_next curves of chosen drives
+                                          in the paper data folder's format (PAPER_FIT_REFERENCE),
+                                          from its own S_next load + measured fit
+    8  run_pole_table    → pole_table   (first only) the three poles of every file with the
+                                          bootstrap error bars as one CSV row per file (+ a text
+                                          file describing the bootstrap), in the union folder
 
 The third transition (ensemble average) has no state-freezing exponent — only
 steps 3 and 4 run on it.
@@ -59,6 +67,7 @@ running anything (run_files/write_shots_per_lambda.py reads
 """
 from __future__ import annotations
 
+import csv
 import fnmatch
 import json
 import re
@@ -96,6 +105,7 @@ from mpm_analysis.io.analysis_json import (
 from mpm_analysis.simulation.postselected_dynamics import PostSelectedDynamicsSimulator
 from mpm_analysis.simulation.liouvillian_spectrum import LiouvillianSpectrum
 from mpm_analysis.io.experimental import EnsembleAverageLoader, PostSelectedLoader, ParityLoader  # noqa: F401  (ParityLoader: PARITY_FOLDER, data_mode="parity")
+from mpm_analysis.io.simulation import load_monte_carlo_npz
 from mpm_analysis.simulation.noise import ShotNoise
 from mpm_analysis.plotting.exploratory import (
     plot_spectrum_panels, plot_time_traces_slider, plot_svd_singular_values,
@@ -125,6 +135,10 @@ _ZT = r"Common\QuantumZeno\Paper\zeno_paper_data"
 _NEW_SCAN_FOLDER = r"C:\Users\admin\Weizmann Institute Dropbox\Noam Nezer\Quantum Circuits Lab\Experiments\Zeno\CavityRecAl6\Chip_TransSap46_5\OPX\two_transmons\click_record_with_post_selected_tomography\Omega_BG0_scan"
 POST_SELECTED_DROPBOX = Path(get_lab_path(_ZT + r"\scan_experiment_results_10"))
 ENS_AVG_DROPBOX = Path(get_lab_path(_ZT + r"\scan_experiment_results_50"))
+PAPER_DATA_DROPBOX = Path(get_lab_path(_ZT))     # first-transition step 7 writes its folders here
+# The S fits whose file format first-transition step 7 copies (reference_format): one
+# <scan file>_mpm_fit.json per drive, keys times_smooth / fit_curve / lambda / original_file
+PAPER_FIT_REFERENCE = POST_SELECTED_DROPBOX / "fitting_results_20251202_162520"
 PARITY_FOLDER = Path(get_lab_path(
     _ZT + r"\click_record_repeated\Omega_BG0_scan\scan_experiment_results_12"
 ))
@@ -142,7 +156,45 @@ PARITY_FOLDER = Path(get_lab_path(
 # 41 drives, so "scan3" / "scan45" / "scan345" share one λ axis.  The λ table
 # follows the folder (LAMBDA_SOURCE_POST below).
 _COMBINED_345 = Path(_NEW_SCAN_FOLDER) / "combined_results_4_and_5__lambda_0.3-1.7__navg_11700"
+# First-transition critical points (step 3 Delta line, step 3c window sweep, step 4 sqrt fit, the MC
+# twin) are fitted ONLY on the λ inside this window.  29 Oct 2026, scans 3+4+5+14+16, t_max 12.4 µs:
+# (1.0, 1.5) is the most stable choice - narrower windows only enlarge the errors (the t_min = 0.2 µs
+# row deviates for every window: the bins 1-2 start-up excess).
+EP_LAMBDA_WINDOW = (1.1, 1.5)
+
+# Any SUBSET of the scans: one folder holds the combined JSONs of every scan side by side,
+# unmerged, each file at its own scan's HMM λ (raw_data_tests/build_union_folder.py; refreshed
+# by update_scan16.py).  POST_SELECTED_DATASET = "union" loads the scans listed here:
+UNION_SCANS = ("3","45","14")      # any of "3", "45" (scans 4+5), "10", "14", "16", "17", ... (later scans join automatically)
+_UNION = Path(_NEW_SCAN_FOLDER) / "union_post_selected_scans"
+# The folder prepared for sharing (raw_data_tests/export_union_scan_exp.py): one subfolder per scan,
+# scan_exp_17 = scan 17 WITHOUT scan_iteration_7 (8 iterations), S_next / S_next_x2 also stored in
+# every JSON, every subfolder with its own HMM λ table (the loader finds it per subfolder).
+# POST_SELECTED_DATASET = "scan_exp" loads the subfolders listed here side by side:
+SCAN_EXP_SCANS = ("3","14","16")   # any of "3", "4_5", "14", "16", "17"
+_SCAN_EXP = Path(_NEW_SCAN_FOLDER) / "union_scan_exp_3_4_5_14_16_17"
+
+
+def _union_files(folder: Path, scans) -> tuple[str, ...]:
+    """The data files of the chosen scans in the union folder, by the scan column of its
+    per-file λ table.  Without the folder: a pattern that matches nothing, so the load
+    step names the problem instead of the import failing."""
+    from mpm_analysis.utils.windows_paths import win_long_path
+    table = Path(folder) / "hmm_lambda_per_file.csv"
+    if not Path(win_long_path(table)).exists():
+        return ("<no union folder: run raw_data_tests/build_union_folder.py>",)
+    with open(win_long_path(table), newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    wanted = {str(s) for s in scans}
+    unknown = sorted(wanted - {r["scan"] for r in rows})
+    if unknown:
+        raise ValueError(f"UNION_SCANS {unknown} are not in {Path(folder).name} "
+                         f"(it holds scans {sorted({r['scan'] for r in rows})}).")
+    return tuple(r["filename"] for r in rows if r["scan"] in wanted)
+
+
 POST_SELECTED_DATASETS = {
+
     "scan3":   (_COMBINED_345, "*_15_10_2026__16_57_51.json"),   # 18 drives
     "scan45":  (_COMBINED_345, "*_15_10_2026__10_08_55.json"),   # 23 drives
     "scan345": (_COMBINED_345, "*.json"),                        # all 41
@@ -153,8 +205,33 @@ POST_SELECTED_DATASETS = {
     "scan345_boost": (Path(_NEW_SCAN_FOLDER) / "combined_results_3_4_5_and_10_boost", "*.json"),
     # all iterations of scan 8 merged per point (raw_data_tests/combine_scan8_iterations.py)
     "scan8": (Path(_NEW_SCAN_FOLDER) / "scan_experiment_results_8" / "combined_iterations", "*.json"),
+    # scan 14: 4 drives at the transition (1455-1570 kHz), 9 iterations x 2500 reps merged
+    # (raw_data_tests/combine_scan14_iterations.py); HMM table beside it = scan14_hmm pooled over passes
+    "scan14": (Path(_NEW_SCAN_FOLDER) / "scan_experiment_results_14" / "combined_iterations", "*.json"),
+    # scan 3 + scan 14 side by side (disjoint grids, raw_data_tests/combine_scan3_and_scan14.py);
+    # one HMM table over both scans; stamps 15_10_2026 (scan 3) / 28_10_2026 (scan 14)
+    "scan3_14": (Path(_NEW_SCAN_FOLDER) / "combined_results_3_and_14", "*.json"),
+    # scan 10 alone (3 iterations x 2500 reps merged) and scan 3 + scan 10 side by side (same script,
+    # --partner scan10); scan 10 stamp 28_10_2026__14_02_39
+    "scan10": (Path(_NEW_SCAN_FOLDER) / "scan_experiment_results_10" / "combined_iterations", "*.json"),
+    "scan3_10": (Path(_NEW_SCAN_FOLDER) / "combined_results_3_and_10", "*.json"),
+    # scan 14 merged at equal drive into the 3+4+5 points (combine_boost_into_345 with BOOST_FOLDER =
+    # scan 14; 4 drives at 34,200 reps); own 41-drive HMM table (scans 3, 4+5, 14 pooled)
+    "scan345_14": (Path(_NEW_SCAN_FOLDER) / "combined_results_3_4_5_and_14", "*.json"),
+    # scan 16: 5 drives above the transition (1570-1730 kHz), a HALF record (62 segments, to 12.4 us)
+    # at 5000 reps/iteration: its S_next has scan 14's S_next_x2 shots, and S_next_x2 = S_next there
+    # (click_record_npz.HALF_RECORD_SEGMENTS).  raw_data_tests/update_scan16.py rebuilds it from the
+    # complete iterations (rerun it after the scan adds iterations)
+    "scan16": (Path(_NEW_SCAN_FOLDER) / "scan_experiment_results_16" / "combined_iterations", "*.json"),
+    # scans 3+4+5+14 (the folder above) + scan 16 side by side: 1570 and 1650 kHz hold two points each
+    # (scan 16 next to 4+5+14 / scan 3); one HMM table over all five scans (update_scan16.py)
+    "scan345_14_16": (Path(_NEW_SCAN_FOLDER) / "combined_results_3_4_5_14_and_16", "*.json"),
+    # the scans of UNION_SCANS above, side by side, each at its own HMM λ
+    "union": (_UNION, _union_files(_UNION, UNION_SCANS)),
+    # the subfolders of SCAN_EXP_SCANS above (a tuple of folders: loaded one by one, merged in λ order)
+    "scan_exp": (tuple(_SCAN_EXP / f"scan_exp_{s}" for s in SCAN_EXP_SCANS), "*.json"),
 }
-POST_SELECTED_DATASET = "scan3"
+POST_SELECTED_DATASET = "scan_exp"
 POST_SELECTED_FOLDER, POST_SELECTED_FILES = POST_SELECTED_DATASETS[POST_SELECTED_DATASET]
 
 ENS_AVG_FOLDER = Path(r"C:\Users\admin\Weizmann Institute Dropbox\Noam Nezer\Quantum Circuits Lab\Experiments\Zeno\CavityRecAl6\Chip_TransSap46_5\OPX\two_transmons\survival_probability\Omega_BG0_scan\combined_results_0_and_1_merged")
@@ -186,8 +263,14 @@ LAMBDA_SOURCE_ENS: bool | str | Path = False    # EnsembleAverageLoader csv_path
 if (HMM_DRIVE_LAMBDA := True):
     # the folder's own table (combined folders: merged over their source scans,
     # raw_data_tests/merge_hmm_drive_tables.py) or the one beside it (scan folders)
-    LAMBDA_SOURCE_POST = next(
-        (p for p in (Path(POST_SELECTED_FOLDER) / "hmm_rates_per_drive.csv",
+    # (a folder whose files come from scans with different HMM λ at one drive, e.g.
+    # combined_results_3_4_5_14_and_16, holds a per-FILE table instead: hmm_lambda_per_file.csv)
+    # (several folders, "scan_exp": "auto" = each subfolder's own hmm_lambda_per_file.csv, found
+    # by the loader per folder; a folder without one would fall back to the stored JSON λ, so
+    # load_records checks that every folder got its table)
+    LAMBDA_SOURCE_POST = "auto" if isinstance(POST_SELECTED_FOLDER, tuple) else next(
+        (p for p in (Path(POST_SELECTED_FOLDER) / "hmm_lambda_per_file.csv",
+                     Path(POST_SELECTED_FOLDER) / "hmm_rates_per_drive.csv",
                      Path(POST_SELECTED_FOLDER).parent / "hmm_rates_per_drive.csv")
          if p.exists()),
         Path(POST_SELECTED_FOLDER).parent / "hmm_rates_per_drive.csv",   # missing → loader error names it
@@ -217,7 +300,7 @@ def main() -> None:
     # -----------------------------------------------------------------------
     # FIRST TRANSITION — post-selected survival probability
     # -----------------------------------------------------------------------
-    if (RUN_FIRST_TRANSITION := True):
+    if (RUN_FIRST_TRANSITION := False):
         print("\n##### FIRST TRANSITION  (post_selected) #####")
 
         # Step 1 — load.
@@ -246,12 +329,13 @@ def main() -> None:
                                             #   first-click histogram), "S_next_far" (segment
                                             #   i+1+N//2), "S_next_x2" (both: 2x shots, record
                                             #   ends at ~12.4 us; halves differ ~1e-3 early by
-                                            #   init history — s_next_ringdown_20261026),
+                                            #   init history — s_next_ringdown_20261026; on a
+                                            #   half record, scan 16, it is that record's S_next),
                                             #   "S_prev_click" / "S_prev_noclick", X/Y/Z …
                                             #   The MC twin writes only the stored S (its NPZ
                                             #   holds `clicks`, which run_pooled_p0.py does not
                                             #   read), so S_pooled does not exist for it → "S".
-            lambda_range=(0, 2),            # λ window to load
+            lambda_range=None,              # λ window to load; None → every file
             t_range = None,               # (t_min, t_max) µs window the fit sees; None → full
                                             #   record, (None, 20) / (2, None) → one-sided.
                                             #   Same mask on the traces AND the bootstrap
@@ -327,7 +411,7 @@ def main() -> None:
                 #   "fit_covariance"     fast Monte-Carlo propagation of the LSQ covariance
                 #                        (forces refine_poles on — it needs the covariance)
                 #   "residual_bootstrap" legacy residual resampling
-                n_boot=0,                         # bootstrap draws / covariance samples; 0 → no
+                n_boot=2000,                         # bootstrap draws / covariance samples; 0 → no
                                                     #   bootstrap: the measured fit, zero error bars,
                                                     #   no per-draw EP / λ_c quantiles
                 bootstrap_center="measured",           # "draws": central poles = mean of the draws,
@@ -335,7 +419,19 @@ def main() -> None:
                                                     #   one more sample of the data (errorbar_bootstrap)
                                                     # "measured": central = fit of the measured curve,
                                                     #   16/84 of the draws around it
-                refine_poles=True,                 # weighted complex-exponential LSQ after the pencil
+                redraw_around="svd_truncated",           # data_bootstrap: what each copy is drawn around
+                                                    #   "measured"      the measured shots (redraw of the
+                                                    #                   first-click histogram): a copy has the
+                                                    #                   data's own noise + one more dose
+                                                    #   "svd_truncated" the measured curve with its Hankel cut to
+                                                    #                   `order` SVD components (the pencil's own
+                                                    #                   truncation, measured L); every point
+                                                    #                   Binomial(N, S3(t)) - one dose, like a repeat
+                                                    #                   of the experiment.  S / S_next* only (one
+                                                    #                   segment per point), not S_pooled; ens_avg:
+                                                    #                   one population (D), its multinomial with
+                                                    #                   the D row set to S3
+                refine_poles=False,                 # weighted complex-exponential LSQ after the pencil
                 conjugate_pairs=True,               # constrain the refinement to conjugate pairs
                 plot_svd=True,                     # SVD-vs-λ model-order calibration figure
                                                     #   (step 1c draws it for every trace, cut marked)
@@ -355,10 +451,8 @@ def main() -> None:
                 first_ep = run_transitions(
                     first_result, json_path=first_json,
                     method="linfit",        # "linfit" (recommended) | "first"
-                    points_below=3,         # fit points: the 3 λ before Delta turns positive
-                    points_above=2,         #   and the 2 after (None, None → ±half_width)
-                    half_width=0.3,         # λ half-window, used only without points_*
-                    lambda_max=None,        # e.g. 1.55 to match the critical-point window
+                    lambda_window=EP_LAMBDA_WINDOW,  # ONE line through every λ in this window
+                    lambda_max=None,        # λ cutoff of the Delta plot (the fit uses the window)
                     plot_discriminant=True, # Delta(λ) with error bars + the fitted line
                 )
 
@@ -369,16 +463,16 @@ def main() -> None:
                 # legend.
                 #   in : first_records, first_result, first_ep
                 #   out: first_window_sweep — one dict per window (lam_ep, lam_ep_err, …)
-                if (FIRST_WINDOW_SWEEP := True):
+                if (FIRST_WINDOW_SWEEP := False):
                     first_window_sweep = run_window_sweep(
                         first_records, first_result, first_ep,
                         loader=PostSelectedLoader(csv_path=LAMBDA_SOURCE_POST),
-                        vary="t_max",       # "t_min" (move the window start) | "t_max" (its end)
-                        values=None,        # µs, e.g. (0, 0.2, 0.4, 0.6, 0.8, 1.0); None → 6
+                        vary="t_min",       # "t_min" (move the window start) | "t_max" (its end)
+                        values=(0,0.2,0.4,0.6),        # µs, e.g. (0, 0.2, 0.4, 0.6, 0.8, 1.0); None → 6
                                             #   automatic: the first 6 time samples from the main
                                             #   window's start ("t_min"), or 6 ends from the record
                                             #   end down to its middle ("t_max"); at most 8
-                        n_boot=20,         # bootstrap draws PER window (the λ_EP error bar);
+                        n_boot=0,         # bootstrap draws PER window (the λ_EP error bar);
                                             #   the run takes ~6x one step-2 bootstrap of this size
                     )
 
@@ -441,12 +535,13 @@ def main() -> None:
             #   out: first_sqrt_fit — SqrtFitResult (lambda_c, lambda_c_err, chi2,
             #        R²); also attached to first_result for the "sqrt" layout of
             #        step 6; 3-panel appendix figure
-            if (FIRST_CRITICAL_POINT := True):
+            if (FIRST_CRITICAL_POINT := False):
                 first_sqrt_fit = run_critical_point(
                     first_result, json_path=first_json,
-                    lambda_c_guess=1.4,
-                    lambda_c_bounds=(1, 1.6),    # guess ± 0.15
-                    lambda_max=2,                 # exclude λ above this from the fit
+                    lambda_c_guess=sum(EP_LAMBDA_WINDOW) / 2,
+                    lambda_c_bounds=EP_LAMBDA_WINDOW,
+                    lambda_max=None,
+                    lambda_window=EP_LAMBDA_WINDOW,   # fit only the λ of step 3's line
                     per_realization=True,
                 )
 
@@ -454,37 +549,110 @@ def main() -> None:
             # model with first_result's poles, amplitudes re-solved per trace.
             #   in : first_records, first_result
             #   out: first_slider (kept alive in _LIVE_WIDGETS)
-            if (FIRST_SLIDER := True):
+            if (FIRST_SLIDER := False):
                 first_slider = run_slider_plot(
                     first_records, first_result,
                     scales={"S": "log", "S_pooled": "log", "S_pooled_strict": "log",
                             "S_next": "log", "S_next_far": "log", "S_next_x2": "log"},   # key → "log"/"linear"
                     take_abs=False,         # plot/fit |signal| (e.g. for parity)
+                    components=True,        # True: each term A_k·exp(p_k·t) of the fit over the
+                                            #   data instead of the summed fit, named and coloured
+                                            #   as in the spectrum plot (e_1 C0, e_2 C1, ...; a
+                                            #   conjugate pair = one curve "e_1+e_2").  On a log
+                                            #   axis |term|, dashed where < 0.  False: the sum
                 )
 
             # Step 6 — paper figure from this run's result.
             #   "discriminant" → 2 panels: A spectrum, B Delta(λ) line fit
-            #   "sqrt"         → 3 panels: A spectrum, B/C splittings + a sqrt
-            #                    overlay chosen by splitting_fit
+            #   "sqrt"         → 3 panels: A spectrum, B Im splitting + a sqrt
+            #                    overlay chosen by splitting_fit, C by panel_c
             #   The Delta line and λ_EP drawn ARE step 3's fit (first_ep), not a refit.
             #   in : first_result, first_ep
             #   out: first_fig (PDF+SVG+PNG into PAPER_FIGURES_DIR if SAVE_FIGURES)
             if (FIRST_FIGURE := True):
                 first_fig = run_figure(
                     first_result, first_ep,
-                    layout="sqrt",                      # appendix: A decay rates, B Im / C Re
-                                                        #   splitting + black √ of step 3's Δ line
+                    layout="sqrt",                      # appendix: A decay rates, B Im splitting +
+                                                        #   black √ of step 3's Δ line, C (panel_c)
+                    panel_c="discriminant",             # C: "discriminant" → (Δe12)²/Ω_S² = Δ/(4 Ω_S²)
+                                                        #   at every λ + step 3's line over its window
+                                                        #   | "real" → Re(Δe12)/Ω_S + √ of the line
                     lambda_max=2,                     # λ cutoff of every panel
                     fit_validity=1.2,
                     real_axis_scale="linear",           # panel A y axis: "linear" | "log"
-                    real_axis_ticks=None,
-                    real_split_axis_ticks=[0.0, 0.5, 1.0],   # panel C (Re splitting / Ω_S)
+                    real_axis_ticks=[0, 2, 4],          # panel A y ticks (None → matplotlib's)
+                    real_split_axis_ticks=[-1, 0, 1],   # panel C y ticks
+                    split_lambda_ticks=[0.5, 0.9, 1.3, 1.7],   # panels B/C λ ticks (None → every
+                                                        #   0.5); one axis shared by A/B/C
                     splitting_fit="discriminant",       # "sqrt" layout overlay:
                                                         #   "discriminant" → √ of step 3's Delta line
                                                         #     (√(−Delta)/2 below λ_EP, √Delta/2 above,
                                                         #     over step 3's window); no step 4
                                                         #   "sqrt" → step 4's sqrt fit (needs step 4)
+                    error_bar_alpha=0.4,                # opacity of the error bars; points stay solid
+                    crit_line_decimals=2,               # λ_EP line drawn at the quoted value (1.30)
                 )
+
+            # Step 8 — pole table: the three poles of every file (central value =
+            # the measured fit, error bars = step 2's bootstrap 16/84 half-widths)
+            # as ONE CSV row per file, written into the union folder next to the
+            # data, with a text file that describes the bootstrap in plain steps.
+            # Per-slot bars (each pole's Re and Im on its own) AND pair-consistent
+            # bars (pair centre, Re/Im splitting, Delta: one number per draw).
+            # Run on the FULL S_next record, all 24.8 µs (t_range=None in step 1:
+            # 125 samples, t = 0 … 24.8 µs, 0.2 µs bins), every file (lambda_range=None).
+            #   in : first_records (file, scan, drive, shots), first_result (poles + bars)
+            #   out: first_pole_table — path of the CSV (the text file sits beside it)
+            if (FIRST_POLE_TABLE := False):
+                first_pole_table = run_pole_table(
+                    first_records, first_result,
+                    out_dir=_SCAN_EXP,              # the shared scan_exp folder (user moved the
+                                                    #   3 Nov table there; a rerun overwrites it)
+                    observable="S_next",            # the trace the poles describe (step 1's key)
+                )
+
+        # Step 7 — S_next fit curves for the paper data folder, in the format of
+        # PAPER_FIT_REFERENCE (zeno_paper_data/scan_experiment_results_10/
+        # fitting_results_20251202_162520: one <scan file>_mpm_fit.json per drive
+        # holding times_smooth / fit_curve / lambda / original_file, nothing else),
+        # written into a NEW PAPER_DATA_DROPBOX/fitting_results_<UTC stamp>/ folder
+        # (old folders are never touched).  Its own load and fit, since step 1 may
+        # load another observable / λ window: S_next of step 1's files, the order-3
+        # pencil of step 2 without the bootstrap (the files hold only the curve),
+        # no result JSON or spectrum figure.  The figure: each file's fit_curve,
+        # read back from the file, over its S_next trace.  Off by default: every
+        # run adds a folder to the shared paper folder.
+        #   in : POST_SELECTED_FOLDER / POST_SELECTED_FILES (step 1's files)
+        #   out: first_export_dir
+        if (FIRST_EXPORT := False):
+            export_records = load_records(
+                PostSelectedLoader(csv_path=LAMBDA_SOURCE_POST), POST_SELECTED_FOLDER,
+                file_glob=POST_SELECTED_FILES,
+                data_mode="post_selected",
+                observables=["S_next"],         # the trace the curves describe
+                lambda_range=None,              # every λ; step 7 keeps drives_khz
+                t_range=None,                   # the full record, as the reference files
+                drop_first_point=False,
+            )
+            _, export_result = _mpm_pipeline(
+                export_records,
+                order=3,                        # as step 2
+                uncertainty_source="data_bootstrap",
+                n_boot=0,                       # the fit of the measured curve only
+                refine_poles=False,
+                conjugate_pairs=True,
+                plot_svd=False,
+                bootstrap_center="measured",
+            )
+            first_export_dir = run_export_figure_data(
+                export_records, export_result, json_path=None,
+                parent=PAPER_DATA_DROPBOX,      # → zeno_paper_data/fitting_results_<stamp>/
+                observable="S_next",
+                n_smooth=300,                   # points of times_smooth, as the reference files
+                drives_khz=(1000, 2125),        # scan 3: λ 0.527 (nearest 0.5) and 2.064
+                reference_format=True,          # the four keys only, checked against the reference
+                plot=True,                      # each file's curve read back over its trace
+            )
 
     # -----------------------------------------------------------------------
     # THIRD TRANSITION — ensemble-average D population
@@ -499,7 +667,7 @@ def main() -> None:
             EnsembleAverageLoader(csv_path=LAMBDA_SOURCE_ENS), ENS_AVG_FOLDER,
             data_mode="ens_avg",
             observables=["D"],              # "D" | "G" | "B" | "error", or several for a joint fit
-            lambda_range=(0, 1.65),
+            lambda_range=(0, 1.7),
             t_range=None,                   # (t_min, t_max) µs; None → full record
             drop_first_point=False,         # the t=0 point is an inconsistent anchor here too
                                             #   (λ₃ 1.13 → 1.03 without it)
@@ -511,7 +679,14 @@ def main() -> None:
                 third_records,
                 order=3,
                 uncertainty_source="data_bootstrap",
-                n_boot=100,
+                n_boot=2000,
+                bootstrap_center="measured",    # central = fit of the measured curve (as FIRST)
+                redraw_around="svd_truncated",  # copies drawn around the measured D cut to `order`
+                                                #   Hankel SVD components: per point ONE multinomial
+                                                #   over D/G/B/error (2·navg shots) with the D row set
+                                                #   to that curve, the others in their measured
+                                                #   ratios; t = 0 like every point.  "measured" →
+                                                #   around the measured D (data noise + one dose)
                 refine_poles=False,
                 conjugate_pairs=True,
                 plot_svd=True,
@@ -523,13 +698,13 @@ def main() -> None:
                 third_ep = run_transitions(
                     third_result, json_path=third_json,
                     method="linfit",
-                    half_width=0.2,
+                    lambda_window=(0.9, 1.3),       # ONE line through every λ in this window
                     lambda_max=None,
                     plot_discriminant=True,
                 )
 
             # Step 4 — sqrt fit → λ_c.   out: third_sqrt_fit (also on third_result)
-            if (THIRD_CRITICAL_POINT := True):
+            if (THIRD_CRITICAL_POINT := False):
                 third_sqrt_fit = run_critical_point(
                     third_result, json_path=third_json,
                     lambda_c_guess=1.1,
@@ -544,20 +719,26 @@ def main() -> None:
                     third_records, third_result,
                     scales={},                      # linear axes
                     take_abs=False,
+                    components=True,                # True: the fit's terms instead of their sum (as FIRST)
                 )
 
             # Step 6 — paper figure (Delta line + λ_EP = step 3's).   out: third_fig
             if (THIRD_FIGURE := True):
                 third_fig = run_figure(
                     third_result, third_ep,
-                    layout="sqrt",
+                    layout="sqrt",                  # as FIRST: A decay rates, B Im splitting, C (panel_c)
+                    panel_c="discriminant",         # C: (Δe12)²/Ω_S² at every λ + step 3's line | "real"
                     lambda_max=1.35,
                     fit_validity=1.3,
                     real_axis_scale="linear",
                     real_axis_ticks=[0.0, 1.0, 2.0],
-                    real_split_axis_ticks=[0.0, 0.4, 0.8],
+                    real_split_axis_ticks=[-0.5, 0.0, 0.5],   # panel C y ticks (data −0.93 … +0.63)
+                    split_lambda_ticks=[0.5, 0.9, 1.3],       # panels B/C λ ticks: every 0.4 from 0.5,
+                                                    #   as FIRST (None → every 0.5); shared by A/B/C
                     splitting_fit="discriminant",   # "sqrt" layout overlay: √ of step 3's Delta line
                                                     #   | "sqrt" (step 4's fit)
+                    error_bar_alpha=0.4,            # opacity of the error bars, as FIRST
+                    crit_line_decimals=3,           # λ_EP line drawn at the quoted value (1.085)
                 )
 
             # Step 7 — snapshot of the figure inputs, written into a NEW
@@ -630,7 +811,7 @@ def main() -> None:
                 mc_ep = run_transitions(
                     mc_result, json_path=mc_json,
                     method="linfit",
-                    half_width=0.3,
+                    lambda_window=EP_LAMBDA_WINDOW,   # as the data (first transition)
                     lambda_max=None,
                     plot_discriminant=True,
                 )
@@ -648,9 +829,10 @@ def main() -> None:
             if (MC_CRITICAL_POINT := False):
                 mc_sqrt_fit = run_critical_point(
                     mc_result, json_path=mc_json,
-                    lambda_c_guess=1.2,
-                    lambda_c_bounds=(0.85, 1.5),
-                    lambda_max=1.5,
+                    lambda_c_guess=sum(EP_LAMBDA_WINDOW) / 2,
+                    lambda_c_bounds=EP_LAMBDA_WINDOW,
+                    lambda_max=None,
+                    lambda_window=EP_LAMBDA_WINDOW,
                     per_realization=True,
                 )
 
@@ -660,6 +842,68 @@ def main() -> None:
                     mc_records, mc_result,
                     scales={"S": "log"},
                     take_abs=False,
+                    components=False,               # True: the fit's terms instead of their sum (as FIRST)
+                )
+
+    # -----------------------------------------------------------------------
+    # SIMULATED GRID — the first-transition steps on ONE (λ × T) survival NPZ
+    # -----------------------------------------------------------------------
+    # A simulation that stores the survival map S(λ, T) on a grid (lambda_values
+    # × T_values), e.g. the three-level tomography Monte Carlo
+    # (zeno_theory_and_experiment/.../three_level_tomography.py: fraction_success_2D
+    # = no-click trials / attempted trials).  io/simulation.load_monte_carlo_npz
+    # reads it; the λ axis is the simulated λ.  n_shots = the attempted trials
+    # behind every point: the data bootstrap draws Binomial(n_shots, S(t)) / n_shots.
+    if (RUN_SIM_GRID := True):
+        SIM_GRID_NPZ = Path(r"C:\Users\admin\Weizmann Institute Dropbox\Noam Nezer\Quantum Circuits Lab\Noam\RT_tomography_scan_experiment_results_0_three_states_simulation.npz")
+        print(f"\n##### SIMULATED GRID  {SIM_GRID_NPZ.name} #####")
+
+        # Step 1 — load the grid.   out: sim_records (one per λ row)
+        sim_records = load_grid_records(
+            SIM_GRID_NPZ,
+            data_mode="post_selected",      # survival curve → post_selected bootstrap / file names
+            observables=["survival"],       # the NPZ's fraction_success_2D (io/simulation
+                                            #   _SIGNAL_KEYS["survival"])
+            n_shots=300_000_000,            # attempted trials per (λ, T) point (the NPZ's N_trials)
+            lambda_range=None,              # every λ row
+            t_range=(None, 12.4),           # µs; the record starts at T = 0.64 (no t = 0 point)
+        )
+
+        # Step 2 — matrix pencil + bootstrap.   out: sim_result, sim_json
+        if (SIM_MPM := True):
+            sim_result, sim_json = run_mpm(
+                sim_records,
+                order=4,
+                uncertainty_source="data_bootstrap",
+                n_boot=0,
+                bootstrap_center="measured",    # as FIRST
+                redraw_around="svd_truncated",  # as FIRST: every point Binomial(n_shots, S3(t))
+                refine_poles=False,
+                conjugate_pairs=False,
+                plot_svd=True,
+                nyquist_check=False,            # True: blank a λ whose pencil has a pole at the
+                                                #   Nyquist frequency |Im| >= 0.9·π/dt (and drop such
+                                                #   draws).  False: keep every pole (full picture);
+                                                #   step 3's Delta leaves the aliased pole out
+            )
+
+            # Step 3 — exceptional point.   out: sim_ep
+            if (SIM_TRANSITIONS := True):
+                sim_ep = run_transitions(
+                    sim_result, json_path=sim_json,
+                    method="linfit",
+                    lambda_window=EP_LAMBDA_WINDOW,   # as the data (first transition)
+                    lambda_max=None,
+                    plot_discriminant=True,
+                )
+
+            # Step 5 — trace browser.   out: sim_slider
+            if (SIM_SLIDER := True):
+                sim_slider = run_slider_plot(
+                    sim_records, sim_result,
+                    scales={"survival": "log"},
+                    take_abs=False,
+                    components=True,                # True: the fit's terms instead of their sum (as FIRST)
                 )
 
     # -----------------------------------------------------------------------
@@ -690,6 +934,8 @@ _LIVE_WIDGETS: list = []
 # Key under which load_records stamps the provenance into every record's
 # metadata; run_mpm copies it into the result metadata (→ the saved JSON).
 _PROVENANCE = "run_provenance"
+# ... and, for a load from several folders, the folder each record's file sits in
+_FILE_FOLDER = "source_folder_of_file"
 
 
 def _show_and_save(fig, figure_tag: str, *, data_mode: str = "unknown",
@@ -724,6 +970,31 @@ def _provenance(records: list[ObservableRecord]) -> dict:
                          "no provenance (data mode, folder, λ source) attached.") from None
 
 
+def _files_tag(prov: dict) -> str:
+    """Short name of the files a load used: '' (whole folder), the glob, or —
+    for a file list from the union folder — its scans ("scans 3+14+16"); for the scan_exp
+    subfolders the same from their names."""
+    fg = prov.get("file_glob", "*.json")
+    if isinstance(prov.get("source_folder"), list):
+        names = [Path(f).name.removeprefix("scan_exp_").replace("_", "+") for f in prov["source_folder"]]
+        return "scans " + "+".join(names)
+    if isinstance(fg, str):
+        return "" if fg == "*.json" else f"files {fg}"
+    from mpm_analysis.utils.windows_paths import win_long_path
+    try:
+        with open(win_long_path(Path(prov["source_folder"]) / "hmm_lambda_per_file.csv"),
+                  newline="", encoding="utf-8") as f:
+            scan_of = {r["filename"]: r.get("scan") for r in csv.DictReader(f)}
+    except OSError:
+        return f"{len(fg)} files"
+    scans = {scan_of.get(n) for n in fg} - {None}
+    if not scans:
+        return f"{len(fg)} files"
+    # measurement order: "45" (scans 4+5) between 3 and 10, then 10, 14, 16, 17, ...
+    scans = sorted(scans, key=lambda s: 4.5 if s == "45" else float(s) if s.isdigit() else 1e9)
+    return "scans " + "+".join("4+5" if s == "45" else s for s in scans)
+
+
 def _observables(result: ZenoAnalysisResult) -> list[str]:
     """Observable keys the result was fitted on, in the order they were loaded."""
     return list(result.metadata["observables"])
@@ -746,9 +1017,10 @@ def _check_pole_ordering(result: ZenoAnalysisResult) -> None:
     EP pair the discriminant follows along λ is slots 0/1 in every draw —
     the splittings, the sqrt fit and ksi read slots 0/1/2 directly; (3) the
     stored central value (decay rate per slot, real and imaginary splitting)
-    lies inside its draws' 16-84 band.  The aggregated half-widths are kept
-    as |c - p16|, |p84 - c|, so a central value outside the band (mislabelled
-    draws, or a bias larger than the error bar) would otherwise go unseen.
+    lies inside its draws' 16-84 band.  The aggregated half-widths do not show
+    a central value outside the band (mislabelled draws, or a bias larger than
+    the error bar): decay rates end their bar at the point, the others keep
+    |c - p16|, |p84 - c|, so it would otherwise go unseen.
     Prints one line when everything passes, the offending λ otherwise.
     """
     raw = result.poles.raw_samples
@@ -824,7 +1096,7 @@ def load_records(
     lambda_range: tuple[float, float] | None,
     t_range: tuple[float | None, float | None] | None,
     drop_first_point: bool,
-    file_glob: str = "*.json",
+    file_glob: str | tuple[str, ...] = "*.json",
 ) -> list[ObservableRecord]:
     """Step 1 — load the traces.  Returns the records.
 
@@ -835,18 +1107,42 @@ def load_records(
     writes into the result JSON.  ``t_range = (t_min, t_max)`` in µs keeps
     only ``t_min <= t <= t_max`` (either end ``None`` → open); ``None`` keeps
     the full record.  ``file_glob`` keeps only the files whose name matches
-    (one source run of a merged folder, POST_SELECTED_SUBSETS).
-    ``MAX_FILES`` (global) caps the number of files.
+    (one source run of a merged folder, POST_SELECTED_SUBSETS); a tuple of
+    globs / file names keeps their union (POST_SELECTED_DATASET = "union").
+    ``MAX_FILES`` (global) caps the number of files.  ``folder`` may be a tuple / list of
+    folders (POST_SELECTED_DATASET = "scan_exp": one subfolder per scan): each is loaded on its
+    own, with its own λ table, and the records are merged in λ order; the provenance then lists
+    every folder and each record keeps its own (``_FILE_FOLDER``).
     """
+    if isinstance(folder, (list, tuple)):
+        records = []
+        for f in folder:
+            loader._resolved = False      # the loader caches ONE folder's λ table: resolve this folder's
+            part = load_records(loader, f, data_mode=data_mode, observables=observables,
+                                lambda_range=lambda_range, t_range=t_range,
+                                drop_first_point=drop_first_point, file_glob=file_glob)
+            if loader.lambda_source.startswith("json"):
+                raise RuntimeError(f"[{data_mode}] {f} has no HMM λ table: its files would sit at "
+                                   "the stored JSON λ next to HMM λ files.  Add the table.")
+            for r in part:
+                r.metadata[_FILE_FOLDER] = str(f)
+            records += part
+        records.sort(key=lambda r: float(r.lambda_val))   # stable: a file's observables keep their order
+        provenance = {**records[0].metadata[_PROVENANCE], "source_folder": [str(f) for f in folder]}
+        for r in records:
+            r.metadata[_PROVENANCE] = provenance
+        print(f"  merged {len(records)} records from {len(folder)} folders")
+        return records
     folder = Path(folder)
     if not folder.exists():
         raise FileNotFoundError(f"[{data_mode}] folder not found: {folder}")
     names = [p.name for p in folder.glob("*.json")]
-    if not any(fnmatch.fnmatch(n, file_glob) for n in names):
+    patterns = (file_glob,) if isinstance(file_glob, str) else tuple(file_glob)
+    if not any(fnmatch.fnmatch(n, p) for n in names for p in patterns):
         stamps = sorted({m.group(1) for n in names
                          if (m := re.search(r"_kHz_(.+)\.json$", n))})
         raise FileNotFoundError(
-            f"[{data_mode}] no file in {folder} matches {file_glob!r}; the file stamps "
+            f"[{data_mode}] no file in {folder} matches {patterns[:3]!r}; the file stamps "
             f"there are {stamps}.  POST_SELECTED_DATASETS pairs each subset with its folder.")
     observables = list(observables)
     if t_range is None:
@@ -873,7 +1169,7 @@ def load_records(
     provenance = {
         "data_mode": data_mode,
         "source_folder": str(folder),
-        "file_glob": file_glob,
+        "file_glob": file_glob if isinstance(file_glob, str) else list(file_glob),
         "lambda_source": loader.lambda_source,
         "observables": observables,
         "lambda_range": None if lambda_range is None else [float(x) for x in lambda_range],
@@ -890,7 +1186,52 @@ def load_records(
           f"lambda axis = {loader.lambda_source}\n"
           f"  time window t_range={t_range} -> {records[0].n_points} points, "
           f"t = [{t0:.3f}, {t1:.3f}] us\n  {folder}"
-          + ("" if file_glob == "*.json" else f"  (files {file_glob})"))
+          + ("" if file_glob == "*.json" else f"  (files {file_glob})" if isinstance(file_glob, str)
+             else f"  ({len(patterns)} files)"))
+    return records
+
+
+def load_grid_records(
+    npz_path: str | Path, *,
+    data_mode: str,
+    observables: list[str],
+    n_shots: int,
+    lambda_range: tuple[float, float] | None,
+    t_range: tuple[float | None, float | None] | None,
+) -> list[ObservableRecord]:
+    """Step 1 (simulated grid) — load ONE (λ × T) simulation NPZ.  Returns the records.
+
+    ``io/simulation.load_monte_carlo_npz``: one ``ObservableRecord`` per λ row,
+    ``t_range`` = (t_min, t_max) µs on the traces AND the bootstrap statistics;
+    ``n_shots`` → Binomial(n_shots, S(t)) / n_shots in the data bootstrap.  The
+    same provenance as ``load_records`` is stamped in for run_mpm / the result JSON.
+    """
+    npz_path = Path(npz_path)
+    records = load_monte_carlo_npz(npz_path, list(observables), lambda_range=lambda_range,
+                                   t_range=t_range, n_shots=n_shots)
+    if not records:
+        raise RuntimeError(f"[{data_mode}] no records loaded from {npz_path} "
+                           f"(observables={observables}, lambda_range={lambda_range}).")
+    provenance = {
+        "data_mode": data_mode,
+        "source_folder": str(npz_path),
+        "lambda_source": "npz lambda_values",
+        "observables": list(observables),
+        "lambda_range": None if lambda_range is None else [float(x) for x in lambda_range],
+        "t_range": None if t_range is None else list(t_range),
+        "drop_first_point": False,
+        "n_shots": int(n_shots),
+    }
+    for rec in records:
+        rec.metadata[_PROVENANCE] = provenance
+    lambdas = sorted({float(r.lambda_val) for r in records})
+    t0, t1 = float(records[0].t[0]), float(records[0].t[-1])
+    print(f"\n=== Load ({data_mode}, simulated grid) ===\n"
+          f"  {len(records)} records, {len(lambdas)} lambda points in "
+          f"[{lambdas[0]:.3f}, {lambdas[-1]:.3f}], observables={observables}, "
+          f"n_shots={n_shots:,} per point\n"
+          f"  time window t_range={t_range} -> {records[0].n_points} points, "
+          f"t = [{t0:.3f}, {t1:.3f}] us\n  {npz_path}")
     return records
 
 
@@ -997,20 +1338,25 @@ def run_mpm(
     conjugate_pairs: bool,
     plot_svd: bool,
     bootstrap_center: str = "measured",
+    redraw_around: str = "measured",
+    nyquist_check: bool = True,
 ) -> tuple[ZenoAnalysisResult, Path | None]:
     """Step 2 — matrix pencil + bootstrap on the records.
 
     Returns ``(result, json_path)``: the ``ZenoAnalysisResult`` (central
     poles, 16/84 bands, raw bootstrap draws in ``result.poles.raw_samples``)
     and the path of the saved result JSON (``None`` in DEBUG).  Also draws
-    the spectrum panels.
+    the spectrum panels.  ``nyquist_check=False`` keeps the pole sets (and
+    draws) with a pole at the Nyquist frequency instead of blanking them;
+    step 3's Delta then leaves that pole out of the pair.
     """
     prov = _provenance(records)
     print(f"\n=== MPM ({prov['data_mode']}, observables={prov['observables']}, order={order}) ===")
     pipeline, result = _mpm_pipeline(
         records, order=order, uncertainty_source=uncertainty_source, n_boot=n_boot,
         refine_poles=refine_poles, conjugate_pairs=conjugate_pairs, plot_svd=plot_svd,
-        bootstrap_center=bootstrap_center,
+        bootstrap_center=bootstrap_center, redraw_around=redraw_around,
+        nyquist_check=nyquist_check,
     )
     _check_pole_ordering(result)
 
@@ -1035,6 +1381,8 @@ def _mpm_pipeline(
     conjugate_pairs: bool,
     plot_svd: bool,
     bootstrap_center: str,
+    redraw_around: str = "measured",
+    nyquist_check: bool = True,
 ) -> tuple[MPMPipeline, ZenoAnalysisResult]:
     """MPM → (Refine) → Bootstrap on the records, run (step 2 without its
     figure and JSON; the window sweep reruns it per window).  Returns
@@ -1045,7 +1393,8 @@ def _mpm_pipeline(
     n_boot = min(n_boot, 20) if DEBUG else n_boot
     steps = [
         MPMStep(order=order, observable_key=observables,
-                plot_svd=plot_svd, n_sv=10, save_dir=OUTPUT_DIR),
+                plot_svd=plot_svd, n_sv=10, save_dir=OUTPUT_DIR,
+                drop_aliased=nyquist_check),
     ]
     if refine_poles or src == "fit_covariance":
         # fit_covariance needs the refinement covariance → RefineStep forced on
@@ -1054,7 +1403,8 @@ def _mpm_pipeline(
     mode = {"data_bootstrap": "data", "errorbar_bootstrap": "errorbar",
             "fit_covariance": "parametric", "residual_bootstrap": "residual"}[src]
     steps.append(BootstrapStep(n_boot=n_boot, seed=SEED, mode=mode, n_jobs=N_JOBS,
-                               center=bootstrap_center))
+                               center=bootstrap_center, redraw_around=redraw_around,
+                               drop_aliased=nyquist_check))
 
     # Same metadata MPMPipeline.from_loader would have written.
     metadata = dict(
@@ -1065,9 +1415,12 @@ def _mpm_pipeline(
         lambda_source=prov["lambda_source"],
         uncertainty_source=src,
         bootstrap_center=bootstrap_center,
+        bootstrap_redraw=redraw_around,
     )
     if prov["drop_first_point"]:
         metadata["drop_first_point"] = True
+    if not nyquist_check:
+        metadata["nyquist_check"] = False   # step 3 reads it: Delta skips the aliased pole
     if prov.get("svd_cut") is not None:
         metadata["svd_cut"] = prov["svd_cut"]
     if prov.get("file_glob", "*.json") != "*.json":
@@ -1080,11 +1433,12 @@ def run_transitions(
     result: ZenoAnalysisResult, *,
     json_path: Path | None,
     method: str,
-    half_width: float,
     lambda_max: float | None,
     plot_discriminant: bool,
+    half_width: float = 0.3,
     points_below: int | None = None,
     points_above: int | None = None,
+    lambda_window: tuple[float, float] | None = None,
 ) -> dict:
     """Step 3 — the exceptional point on the pole strands, with its error bar.
 
@@ -1111,13 +1465,19 @@ def run_transitions(
     print(f"\n=== Exceptional point ({data_mode}, {obs_tag}) ===")
 
     c = _ep_crossing(result, method=method, half_width=half_width, lambda_max=lambda_max,
-                     points_below=points_below, points_above=points_above)
+                     points_below=points_below, points_above=points_above,
+                     lambda_window=lambda_window)
     lam_d, d_central, d_sigma = c["lam_d"], c["d_central"], c["d_sigma"]
     lam_ep, err, fit, first = c["lam_ep"], c["lam_ep_err"], c["fit"], c["first"]
+    # a fixed λ window: a zero outside it is an extrapolation, not a crossing
+    outside = bool(lambda_window is not None and np.isfinite(lam_ep)
+                   and not lambda_window[0] <= lam_ep <= lambda_window[1])
     ep: dict = {"delta_crossing_method": method, "delta_half_width": half_width,
                 "delta_points_below": points_below, "delta_points_above": points_above,
+                "delta_lambda_window": None if lambda_window is None else list(lambda_window),
                 "delta_lambda_max": lambda_max, "lambda_ep": float(lam_ep),
-                "lambda_ep_error": err, "chi2": c["chi2"], "dof": c["dof"]}
+                "lambda_ep_error": err, "chi2": c["chi2"], "dof": c["dof"],
+                "lambda_ep_outside_window": outside}
     # The line itself (coef in the poles' units): the paper figure (step 6)
     # draws this fit, it does not refit.
     ep["delta_fit"] = dict(
@@ -1140,10 +1500,16 @@ def run_transitions(
               f"[weighted line fit to the measured Delta, chi2/dof = {c['chi2']:.2f}/{c['dof']}"
               + (f" = {red:.2f}; error x sqrt(chi2/dof) = {err * np.sqrt(red):.4f}" if red > 1 else "")
               + "]")
+    if outside:
+        print(f"  NOTE  the line's zero {lam_ep:.3f} lies OUTSIDE the fit range lam "
+              f"{lambda_window[0]:g}-{lambda_window[1]:g}: Delta does not cross zero inside it "
+              "(extrapolated value, not an EP; not drawn).")
     if fit["window"] is not None:
         wl = lam_d[fit["window"]]
         n_lo = int(np.sum(wl < lam_ep))
-        rule = (f"fixed: {points_below} before / {points_above} after Delta turns positive"
+        rule = (f"every point of lam {lambda_window[0]:g}-{lambda_window[1]:g}"
+                if lambda_window is not None else
+                f"fixed: {points_below} before / {points_above} after Delta turns positive"
                 if points_below is not None or points_above is not None
                 else f"+-{half_width}" + (" held fewer than 5" if fit.get("widened") else ""))
         print(f"                  fit points: lam {', '.join(f'{x:.3f}' for x in wl)}  "
@@ -1152,7 +1518,8 @@ def run_transitions(
 
     if plot_discriminant:
         ax_d = plot_discriminant_curve(
-            lam_d, d_central, fit=fit, lambda_ep=lam_ep, lambda_ep_sigma=err,
+            lam_d, d_central, fit=fit, lambda_ep=None if outside else lam_ep,
+            lambda_ep_sigma=None if outside else err,
             first_crossing=first[0] if first else None, delta_sigma=d_sigma,
             title=f"Exceptional point: Delta = 0  ({data_mode}, {obs_tag})",
         )
@@ -1218,11 +1585,14 @@ def run_window_sweep(
         refine_poles="refine_conjugate" in extras,
         conjugate_pairs=bool(extras.get("refine_conjugate", True)),
         bootstrap_center=result.metadata.get("bootstrap_center", "measured"),
+        redraw_around=result.metadata.get("bootstrap_redraw", "measured"),
+        nyquist_check=result.metadata.get("nyquist_check", True),
     )
     crossing = dict(method=ep["delta_crossing_method"], half_width=ep["delta_half_width"],
                     lambda_max=ep.get("delta_lambda_max"),
                     points_below=ep.get("delta_points_below"),
-                    points_above=ep.get("delta_points_above"))
+                    points_above=ep.get("delta_points_above"),
+                    lambda_window=ep.get("delta_lambda_window"))
     svd_cut = prov.get("svd_cut")
     dropped = {f for d in (svd_cut or {}).get("dropped", []) for f in d["files"]}
     subset = prov.get("file_glob", "*.json")
@@ -1259,17 +1629,24 @@ def run_window_sweep(
         chi = "" if r["chi2"] is None else f"{r['chi2']:5.1f}/{r['dof']}"
         pts = ("" if r["fit"]["window"] is None else
                ", ".join(f"{x:.3f}" for x in r["lam_d"][r["fit"]["window"]]))
+        lw_ = crossing.get("lambda_window")
+        flag = ("   <- zero OUTSIDE the fit range: no crossing in it"
+                if lw_ and np.isfinite(r["lam_ep"]) and not lw_[0] <= r["lam_ep"] <= lw_[1] else "")
         print(f"  [{r['t_window'][0]:5.2f}, {r['t_window'][1]:6.2f}] {r['n_points']:6d} "
-              f"{r['lam_ep']:8.4f} {err:>7} {chi:>10}  {pts}")
+              f"{r['lam_ep']:8.4f} {err:>7} {chi:>10}  {pts}{flag}")
 
     for r in rows:
         a, b = r["t_window"]
-        r["label"] = rf"$t \in [{a:.2f}, {b:.2f}]$ µs"
+        r["label"] = (rf"$t_{{\mathrm{{{vary[2:]}}}}}$ = {r['value']:g} $\mu$s   "
+                      rf"(data $t \in [{a:.2f}, {b:.2f}]$ $\mu$s)")
     data_mode, scan_number = _result_tags(result)
     obs_tag = "+".join(_observables(result))
-    sub_tag = "" if subset == "*.json" else f", files {subset}"
+    sub_tag = _files_tag(prov)
+    lw = crossing.get("lambda_window")
+    fit_tag = rf"; line fit over $\lambda$ = {lw[0]:g}-{lw[1]:g}" if lw else ""
     fig = plot_discriminant_window_sweep(
-        rows, title=f"Exceptional point vs fit window ({data_mode}, {obs_tag}{sub_tag})")
+        rows, title=(f"Exceptional point vs window {'start' if vary == 't_min' else 'end'} "
+                     f"({data_mode}, {obs_tag}{', ' + sub_tag if sub_tag else ''}{fit_tag})"))
     _show_and_save(fig, f"discriminant_window_sweep_{vary}",
                    data_mode=data_mode, scan_number=scan_number)
     return rows
@@ -1282,6 +1659,7 @@ def _ep_crossing(
     lambda_max: float | None,
     points_below: int | None = None,
     points_above: int | None = None,
+    lambda_window: tuple[float, float] | None = None,
 ) -> dict:
     """Delta(λ) of the EP pair, its error bars and the λ_EP of ONE weighted
     line fit (the numbers of step 3; the window sweep reuses them per window).
@@ -1296,7 +1674,8 @@ def _ep_crossing(
        fit covariance (error bars absolute) and χ² of the fit.  The points:
        ``points_below`` / ``points_above`` around the first rise of Delta
        through zero when given (fixed count, no re-centring), else
-       ±``half_width`` around the sign change (≥ 5 nearest).
+       ±``half_width`` around the sign change (≥ 5 nearest); ``lambda_window``
+       = (lo, hi) instead fits EVERY point in that λ range (no seed).
 
     ``method="first"``: λ_EP = the first sign change, no error.  Returns a
     dict: ``lam_d``, ``d_central``, ``d_sigma`` (None without draws),
@@ -1306,14 +1685,15 @@ def _ep_crossing(
     import warnings
 
     lam_d = np.asarray(result.lambda_values, dtype=float)
-    d_central = discriminant_from_poles(_central_poles(result))
+    skip = not result.metadata.get("nyquist_check", True)   # Nyquist check off: kept aliased poles
+    d_central = discriminant_from_poles(_central_poles(result), skip_aliased=skip)
     keep = np.ones(lam_d.shape, dtype=bool) if lambda_max is None else lam_d <= lambda_max
     lam_d, d_central = lam_d[keep], d_central[keep]
 
     d_sigma = None
     raw = result.poles.raw_samples
     if raw is not None:
-        d_draws = discriminant_from_poles(np.asarray(raw.samples))[keep]   # (n_lam, n_boot)
+        d_draws = discriminant_from_poles(np.asarray(raw.samples), skip_aliased=skip)[keep]   # (n_lam, n_boot)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)     # failed draws: NaN
             lo, hi = np.nanpercentile(d_draws, [16, 84], axis=1)
@@ -1321,7 +1701,8 @@ def _ep_crossing(
 
     lam_ep, fit = linfit_zero_crossing(lam_d, d_central, sigma=d_sigma,
                                        half_width=half_width, return_fit=True,
-                                       n_below=points_below, n_above=points_above)
+                                       n_below=points_below, n_above=points_above,
+                                       window=None if lambda_window is None else tuple(lambda_window))
     first = find_zero_crossings(lam_d, d_central)
     lam_ep_err = fit.get("sigma_zero")
     if method == "first":
@@ -1457,8 +1838,13 @@ def run_critical_point(
     lambda_c_bounds: tuple[float, float],
     lambda_max: float | None,
     per_realization: bool,
+    lambda_window: tuple[float, float] | None = None,
 ):
     """Step 4 — sqrt fit of the pole splitting → lambda_c (aggregate + per realization).
+
+    ``lambda_window = (lo, hi)`` fits only the λ inside it (the λ of step 3's
+    Delta line, so both critical points use the same points); it overrides
+    ``lambda_max``.
 
     Returns the ``SqrtFitResult``; it is also attached to the result as
     ``result.critical_point_sqrt_fit`` (the "sqrt" figure layout reads it)
@@ -1466,7 +1852,10 @@ def run_critical_point(
     """
     data_mode, scan_number = _result_tags(result)
     print(f"\n=== Critical-point fit ({data_mode}, {'+'.join(_observables(result))}) ===")
-    cp = CriticalPointPipeline(result, lambda_max=lambda_max)
+    lam_lo, lam_hi = lambda_window if lambda_window is not None else (None, lambda_max)
+    cp = CriticalPointPipeline(result, lambda_max=lam_hi, lambda_min=lam_lo)
+    if lambda_window is not None:
+        print(f"  fit window: lam {lam_lo:g}-{lam_hi:g}")
     fit = cp.fit(
         lambda_c_guess=lambda_c_guess, soft_bounds=True, lambda_c_bounds=lambda_c_bounds,
         window_left=50, window_right=15,
@@ -1477,8 +1866,12 @@ def run_critical_point(
 
     if per_realization and result.poles.raw_samples is not None:
         raw = result.poles.raw_samples
-        if lambda_max is not None:
-            m = raw.lambda_values <= lambda_max
+        if lam_hi is not None or lam_lo is not None:
+            m = np.ones(np.shape(raw.lambda_values), dtype=bool)
+            if lam_hi is not None:
+                m &= raw.lambda_values <= lam_hi
+            if lam_lo is not None:
+                m &= raw.lambda_values >= lam_lo
             raw = PoleSamples(
                 samples=raw.samples[m],
                 observable_key=raw.observable_key,
@@ -1506,8 +1899,12 @@ def run_critical_point(
     # 3-panel appendix-style figure; the fit lands on the result so the
     # "sqrt" figure layout can reuse it.
     cp.result.critical_point_sqrt_fit = fit
+    # the figure shows every λ up to lambda_max (all of them without one); the sqrt
+    # curve is drawn only up to the top of the fitted range
+    fig_lam_max = lambda_max if lambda_max is not None else float(np.nanmax(cp.result.lambda_values))
     fig = plot_appendix_bootstrap(
-        cp.result, lambda_max=lambda_max, fit_validity_limit=lambda_max,
+        cp.result, lambda_max=fig_lam_max,
+        fit_validity_limit=lam_hi if lam_hi is not None else fig_lam_max,
         real_axis_ticks=[0.0, 1, 2], real_split_axis_ticks=[0.0, 0.6, 1.2],
     )
     _show_and_save(fig, "critical_point_appendix",
@@ -1523,10 +1920,14 @@ def run_slider_plot(
     records: list[ObservableRecord], result: ZenoAnalysisResult, *,
     scales: dict[str, str],
     take_abs: bool,
+    components: bool,
 ):
     """Step 5 — interactive per-λ trace browser; the fit overlay uses the result's poles.
 
-    Returns the slider (also kept in ``_LIVE_WIDGETS`` so it stays responsive).
+    ``components=True`` draws the fit's terms A_k·exp(p_k·t) over the data instead of
+    their sum, named and coloured as in the spectrum plot (e_1, e_2, ...; a conjugate
+    pair as one curve, its real sum).  Returns the slider (also kept in
+    ``_LIVE_WIDGETS`` so it stays responsive).
     """
     central = _central_poles(result)
     fixed_poles = {float(lam): central[i] for i, lam in enumerate(result.lambda_values)}
@@ -1536,6 +1937,7 @@ def run_slider_plot(
         scales=scales,
         take_abs=take_abs,
         mpm_order=_order(result),
+        components=components,
         fixed_poles=fixed_poles,
     )
     _LIVE_WIDGETS.append(slider)
@@ -1551,6 +1953,10 @@ def run_figure(
     real_axis_ticks: list | None,
     real_split_axis_ticks: list | None,
     splitting_fit: str,
+    panel_c: str,
+    split_lambda_ticks: list | None,
+    error_bar_alpha: float = 1.0,
+    crit_line_decimals: int | None = None,
 ):
     """Step 6 — paper transition figure from this run's result.
 
@@ -1559,6 +1965,17 @@ def run_figure(
     ``layout="sqrt"`` with ``splitting_fit="sqrt"`` needs
     ``result.critical_point_sqrt_fit`` (step 4); with ``"discriminant"`` the
     overlay is the square root of step 3's line and step 4 is not needed.
+    ``panel_c`` ("sqrt" layout): panel C shows ``"real"`` Re(Δe12)/Ω_S, or
+    ``"discriminant"`` (Δe12)²/Ω_S² = Delta/(4 Ω_S²) at every λ with step 3's
+    line over its window; ``split_lambda_ticks``: the λ ticks of panels B/C
+    (None → every 0.5).
+    The Im / Re bars are the attempts' 16-84 % range of Delta (not symmetrized)
+    converted to splittings; only the Delta line fit (and the Delta points drawn
+    with it) uses the symmetrized bar.
+    ``error_bar_alpha`` is the opacity of all bars.  ``crit_line_decimals``:
+    the vertical λ_EP line is drawn at λ_EP rounded to that many decimals —
+    the value as the paper quotes it (2 → 1.30) — in every panel; None →
+    unrounded.  The dashed curves still end at the fit's own zero.
     Returns the figure, or ``None`` when the sqrt fit is missing.  With
     SAVE_FIGURES: PDF + SVG + high-res PNG into PAPER_FIGURES_DIR.
     """
@@ -1582,13 +1999,19 @@ def run_figure(
         real_axis_scale=real_axis_scale,
         real_axis_ticks=real_axis_ticks,
         real_split_axis_ticks=real_split_axis_ticks,
+        panel_c=panel_c,
+        split_lambda_ticks=split_lambda_ticks,
         discriminant_fit=ep["delta_fit"],
+        error_alpha=error_bar_alpha,
+        crit_line_decimals=crit_line_decimals,
     )
     # Paper figures: own folder, PDF + SVG + high-res PNG, stem naming the
     # layout, data mode, scan, observables and order + UTC stamp.
     if SAVE_FIGURES and not DEBUG:
         from mpm_analysis.utils.windows_paths import save_figure_pdf_svg
         layout_tag = "sqrt_from_disc" if (layout, splitting_fit) == ("sqrt", "discriminant") else layout
+        if layout == "sqrt" and panel_c == "discriminant":
+            layout_tag += "_c_disc"
         stem = build_figure_filename(
             figure_tag=f"transition_{layout_tag}_{'+'.join(observables)}_order{order}",
             data_mode=data_mode, scan_number=scan_number, extension="",
@@ -1605,70 +2028,498 @@ def run_export_figure_data(
     parent: str | Path,
     observable: str,
     n_smooth: int,
+    drives_khz: tuple[int, ...] | None = None,
+    reference_format: bool = False,
+    plot: bool = False,
 ) -> Path:
-    """Step 7 — write the files run_files/make_third_transition_figure.py reads.
+    """Step 7 — per-λ fit curves into a NEW ``<parent>/fitting_results_<UTC stamp>/``.
 
-    A fresh ``<parent>/fitting_results_<UTC stamp>/`` folder receives this
-    run's result JSON (panel B; ``json_path`` copied as it stands, or a fresh
-    save when there is none) and one ``<scan file>_mpm_fit.json`` per λ
-    (panel A overlays): ``times_smooth`` / ``fit_curve`` of the modal model
-    with the result's poles at that λ and amplitudes re-solved on the
-    ``observable`` trace of ``records`` — the same construction as the slider
-    overlay.  Returns the folder.
+    One ``<scan file>_mpm_fit.json`` per λ: ``times_smooth`` / ``fit_curve``
+    of the modal model with the result's poles at that λ and amplitudes
+    re-solved on the ``observable`` trace of ``records`` (``n_smooth`` points
+    from the trace's first to its last time) — the same construction as the
+    slider overlay.  Default (the files run_files/make_third_transition_figure.py
+    reads): each file also carries the poles, amplitudes and provenance, and the
+    folder receives this run's result JSON (panel B; ``json_path`` copied as it
+    stands, or a fresh save when there is none).  ``reference_format`` → the
+    files of PAPER_FIT_REFERENCE exactly: the keys times_smooth, fit_curve,
+    lambda, original_file and nothing else, indent 4, CRLF, no result JSON;
+    every file is checked against a reference file.  ``drives_khz`` → only the
+    drives with these kHz in the file name (an error if one is missing).
+    ``plot`` → each written file's fit_curve, read back from the file, over its
+    trace.  Returns the folder.
     """
+    from mpm_analysis.utils.windows_paths import win_long_path
+
     prov = _provenance(records)
-    traces = [r for r in records if r.observable_key == observable]
-    if not traces:
-        raise ValueError(f"export observable '{observable}' is not among the loaded "
-                         f"observables {prov['observables']}.")
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    out = Path(parent) / f"fitting_results_{stamp}"
-    out.mkdir(parents=True, exist_ok=False)
-    print(f"\n=== Export for make_third_transition_figure.py ({prov['data_mode']}) ===")
-
-    # Panel B: the result JSON (already augmented with the sqrt fit if the
-    # critical point ran; DEBUG never saved one, so save a fresh copy here).
-    if json_path is not None:
-        result_name = Path(shutil.copy2(json_path, out / Path(json_path).name)).name
-    else:
-        result_name = save_result(result, out, full=False).name
-    print(f"  {result_name}")
-
-    # Panel A: per-λ fit curves of `observable` with the result's poles.
     lam_res = np.asarray(result.lambda_values, dtype=float)
     poles_res = _central_poles(result)
-    source_folder = Path(prov["source_folder"])
-    n_written = n_skipped = 0
-    for rec in traces:
-        i = int(np.argmin(np.abs(lam_res - rec.lambda_val)))
+    chosen, n_skipped = [], 0                      # (record, its poles) to write
+    for rec, i in _records_with_pole_index(records, result, observable):
+        if drives_khz is not None and _drive_khz(rec.source_file) not in drives_khz:
+            continue
         poles = poles_res[i]
         if abs(lam_res[i] - rec.lambda_val) > 1e-6 or not np.all(np.isfinite(poles)):
             n_skipped += 1
             continue
+        chosen.append((rec, poles))
+    if drives_khz is not None:
+        missing = sorted(set(drives_khz) - {_drive_khz(r.source_file) for r, _ in chosen})
+        if missing:
+            raise ValueError(f"export: no {observable} trace with finite poles at {missing} kHz "
+                             f"in {prov['source_folder']}.")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    out = Path(parent) / f"fitting_results_{stamp}"
+    out.mkdir(parents=True, exist_ok=False)
+    print(f"\n=== Step 7 export ({prov['data_mode']}, {observable}) ===")
+
+    result_name = None
+    if not reference_format:
+        # Panel B: the result JSON (already augmented with the sqrt fit if the
+        # critical point ran; DEBUG never saved one, so save a fresh copy here).
+        if json_path is not None:
+            result_name = Path(shutil.copy2(json_path, out / Path(json_path).name)).name
+        else:
+            result_name = save_result(result, out, full=False).name
+        print(f"  {result_name}")
+
+    # Panel A: per-λ fit curves of `observable` with the result's poles.
+    source_folder = prov["source_folder"]          # a list for a load from several folders
+    written = []
+    for rec, poles in chosen:
         amps = solve_linear_amplitudes(rec.t, rec.signal, poles)
         t_smooth = np.linspace(float(rec.t[0]), float(rec.t[-1]), int(n_smooth))
         payload = {
             "times_smooth": t_smooth.tolist(),
             "fit_curve": reconstruct_signal(t_smooth, poles, amps).tolist(),
             "lambda": float(rec.lambda_val),
-            "observable": observable,
-            "poles_re_1_per_us": np.real(poles).tolist(),
-            "poles_im_rad_per_us": np.imag(poles).tolist(),
-            "amplitudes_re": np.real(amps).tolist(),
-            "amplitudes_im": np.imag(amps).tolist(),
-            "mpm_order": _order(result),
-            "lambda_source": prov["lambda_source"],
-            "analysis_json": result_name,
-            "original_file": str(source_folder / rec.source_file),
         }
-        with open(out / f"{Path(rec.source_file).stem}_mpm_fit.json", "w",
-                  encoding="utf-8") as f:
-            json.dump(payload, f, indent=1)
-        n_written += 1
-    print(f"  {n_written} *_mpm_fit.json files ({observable}, {n_smooth} points)"
-          + (f", {n_skipped} records without a matching λ / finite poles" if n_skipped else ""))
+        if not reference_format:
+            payload.update({
+                "observable": observable,
+                "poles_re_1_per_us": np.real(poles).tolist(),
+                "poles_im_rad_per_us": np.imag(poles).tolist(),
+                "amplitudes_re": np.real(amps).tolist(),
+                "amplitudes_im": np.imag(amps).tolist(),
+                "mpm_order": _order(result),
+                "lambda_source": prov["lambda_source"],
+                "analysis_json": result_name,
+            })
+        payload["original_file"] = str(Path(rec.metadata.get(_FILE_FOLDER) or source_folder)
+                                       / rec.source_file)
+        path = out / f"{Path(rec.source_file).stem}_mpm_fit.json"
+        with open(win_long_path(path), "w", encoding="utf-8",
+                  newline="\r\n" if reference_format else None) as f:
+            json.dump(payload, f, indent=4 if reference_format else 1)
+        if reference_format:
+            _check_reference_format(path)
+        written.append((rec, path))
+    print(f"  {len(written)} *_mpm_fit.json files ({observable}, {n_smooth} points)"
+          + (f", {n_skipped} records without a matching λ / finite poles" if n_skipped else "")
+          + (f"; format checked against {PAPER_FIT_REFERENCE.name}" if reference_format else ""))
     print(f"  Folder: {out}")
+    if plot and written:
+        _plot_exported_fits(written, observable, prov["data_mode"])
     return out
+
+
+def _drive_khz(name: str) -> int | None:
+    """The drive (kHz) in a scan file name ``…OBG0_<kHz>_kHz…``; None without one."""
+    m = re.search(r"OBG0_(\d+)_kHz", name)
+    return int(m.group(1)) if m else None
+
+
+def _records_with_pole_index(
+    records: list[ObservableRecord], result: ZenoAnalysisResult, observable: str,
+) -> list[tuple[ObservableRecord, int]]:
+    """The ``observable`` records in λ order, each with the index of its λ slice in
+    ``result`` — the pipeline's slice order (records sorted by λ, stable), so two
+    files at one λ (scans side by side at one drive) each meet their own slice."""
+    prov = _provenance(records)
+    traces = sorted((r for r in records if r.observable_key == observable),
+                    key=lambda r: r.lambda_val)
+    if not traces:
+        raise ValueError(f"observable '{observable}' is not among the loaded "
+                         f"observables {prov['observables']}.")
+    lam_res = np.asarray(result.lambda_values, dtype=float)
+    taken: dict[float, int] = {}
+    out = []
+    for rec in traces:
+        same = np.flatnonzero(np.abs(lam_res - rec.lambda_val) <= 1e-12)
+        k = taken.get(rec.lambda_val, 0)
+        taken[rec.lambda_val] = k + 1
+        i = int(same[k]) if k < same.size else int(np.argmin(np.abs(lam_res - rec.lambda_val)))
+        out.append((rec, i))
+    return out
+
+
+# the common prefix of the post-selected scan file names, dropped for the table's `name`
+_SCAN_FILE_PREFIX = "click_record_with_post_selected_tomography_data__"
+
+
+def run_pole_table(
+    records: list[ObservableRecord], result: ZenoAnalysisResult, *,
+    out_dir: str | Path,
+    observable: str,
+    plot: bool = True,
+) -> Path:
+    """Step 8 — the poles of every file with their error bars, one CSV row per file.
+
+    Written into ``out_dir`` as ``poles_<observable>_scans_<…>.csv`` (no stamp: a rerun on
+    the same scans overwrites) with ``…_bootstrap_procedure.txt`` beside it (the bootstrap
+    of step 2 in numbered plain steps + the column glossary).  Rows are sorted by λ.  Columns:
+
+    ``name`` (file name without the common prefix), ``scan`` (from the folder's
+    hmm_lambda_per_file.csv: 3, 4+5, 14, …; else the records' scan_number),
+    ``drive_kHz``, ``lambda``, ``shots_per_point`` (attempts behind every point
+    t > 0 of ``observable``), ``n_draws_kept`` (bootstrap draws with three finite poles);
+    then per pole k = 1..3 (slots 1, 2 = the EP pair, 3 = the slow real pole):
+    ``pole{k}_re`` = Re (1/µs, = −decay rate) with ``_err_minus`` / ``_err_plus`` and
+    ``pole{k}_im`` = Im (rad/µs) with the same — the per-slot 16/84 half-widths of
+    ``result.poles``; then the pair-consistent numbers, one value per draw:
+    ``pair_centre_re`` = (Re p1 + Re p2)/2, ``pair_re_splitting`` = |Re p2 − Re p1|/2,
+    ``pair_im_splitting`` = |Im p2 − Im p1|/2 (``result.poles.*_splitting``),
+    ``pair_delta`` = Re[(p1 − p2)²] (the EP discriminant of step 3), each with
+    ``_err_minus`` / ``_err_plus`` = central − P16 / P84 − central of the draws;
+    last ``file``.  A missing / non-finite value is an empty cell.
+
+    ``plot`` → a check figure read back from the CSV: Re and Im of the three poles vs λ
+    with their bars, and the pair columns.  Returns the CSV path.
+    """
+    from mpm_analysis.utils.windows_paths import win_long_path
+
+    prov = _provenance(records)
+    order = _order(result)
+    lam_res = np.asarray(result.lambda_values, dtype=float)
+    P = result.poles
+    C = _central_poles(result)                                   # (n_lambda, order)
+    raw = P.raw_samples
+    D = None if raw is None else np.asarray(raw.samples)         # (n_lambda, n_boot, order)
+    n_boot = 0 if D is None else D.shape[1]
+
+    # scan tag per file: the union folder's per-file λ table (3 / 45 / 14 …)
+    scan_of: dict[str, str] = {}
+    folders = prov["source_folder"]
+    for folder in (folders if isinstance(folders, list) else [folders]):
+        table = Path(folder) / "hmm_lambda_per_file.csv"
+        try:
+            with open(win_long_path(table), newline="", encoding="utf-8") as f:
+                scan_of.update({r["filename"]: r.get("scan", "") for r in csv.DictReader(f)})
+        except OSError:
+            pass
+    def _scan_tag(rec) -> str:
+        s = scan_of.get(rec.source_file)
+        if s is None:
+            s = rec.metadata.get("scan_number")
+        s = "" if s is None else str(s)
+        return "4+5" if s == "45" else s
+
+    # pair-consistent draws: one number per draw, bars around the measured value
+    def _bars(central: np.ndarray, draws: np.ndarray | None):
+        """(err_minus, err_plus) = central − P16, P84 − central over the finite draws."""
+        if draws is None:
+            return np.full(central.shape, np.nan), np.full(central.shape, np.nan)
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            lo, hi = np.nanpercentile(draws, [16, 84], axis=1)
+        return central - lo, hi - central
+    centre_c = C[:, :2].real.mean(axis=1)
+    delta_c = discriminant_from_poles(C)
+    if D is not None:
+        kept = np.all(np.isfinite(D), axis=2)                     # (n_lambda, n_boot)
+        n_kept = kept.sum(axis=1)
+        Dk = np.where(kept[..., None], D, np.nan)
+        centre_m, centre_p = _bars(centre_c, Dk[:, :, :2].real.mean(axis=2))
+        delta_m, delta_p = _bars(delta_c, discriminant_from_poles(Dk))
+    else:
+        n_kept = np.zeros(len(lam_res), dtype=int)
+        centre_m = centre_p = delta_m = delta_p = np.full(len(lam_res), np.nan)
+    def _split(name):
+        v, lo, hi = (getattr(P, name), getattr(P, name + "_lower"), getattr(P, name + "_upper"))
+        nan = np.full(len(lam_res), np.nan)
+        return (nan if v is None else v, nan if lo is None else lo, nan if hi is None else hi)
+
+    def _shots(rec) -> int | None:
+        n = rec.metadata.get("bootstrap_stats", {}).get(f"N_attempts_{observable}")
+        if n is None:
+            return None
+        n = np.asarray(n, dtype=float).ravel()
+        body = n[1:] if n.size > 1 else n
+        body = body[np.isfinite(body)]
+        if body.size and not np.all(body == body[0]):
+            raise ValueError(f"{rec.source_file}: N_attempts_{observable} is not constant for t > 0 "
+                             f"({body.min():g} … {body.max():g}).")
+        return int(body[0]) if body.size else None
+
+    pole_cols = [f"pole{k}_{q}" for k in range(1, order + 1)
+                 for q in ("re", "re_err_minus", "re_err_plus", "im", "im_err_minus", "im_err_plus")]
+    pair_cols = [f"{p}{q}" for p in ("pair_centre_re", "pair_re_splitting", "pair_im_splitting",
+                                     "pair_delta")
+                 for q in ("", "_err_minus", "_err_plus")]
+    header = (["name", "scan", "drive_kHz", "lambda", "shots_per_point", "n_draws_kept"]
+              + pole_cols + pair_cols + ["file"])
+    rsplit, isplit = _split("real_splitting"), _split("imag_splitting")
+
+    def _cell(x):
+        return "" if x is None or (isinstance(x, float) and not np.isfinite(x)) else x
+
+    rows, scans_seen = [], []
+    for rec, i in _records_with_pole_index(records, result, observable):
+        if abs(lam_res[i] - rec.lambda_val) > 1e-6:
+            raise RuntimeError(f"{rec.source_file}: λ {rec.lambda_val:.6f} has no slice in the result.")
+        tag = _scan_tag(rec)
+        if tag not in scans_seen:
+            scans_seen.append(tag)
+        row = [Path(rec.source_file).stem.removeprefix(_SCAN_FILE_PREFIX), tag,
+               _drive_khz(rec.source_file), float(lam_res[i]), _shots(rec), int(n_kept[i])]
+        for k in range(order):
+            # Re = −decay: the decay rate's upper half-width is Re's lower one
+            row += [-P.decay_rates[i, k], P.decay_rates_upper[i, k], P.decay_rates_lower[i, k],
+                    P.frequencies[i, k], P.frequencies_lower[i, k], P.frequencies_upper[i, k]]
+        row += [centre_c[i], centre_m[i], centre_p[i],
+                rsplit[0][i], rsplit[1][i], rsplit[2][i],
+                isplit[0][i], isplit[1][i], isplit[2][i],
+                delta_c[i], delta_m[i], delta_p[i]]
+        row.append(rec.source_file)
+        # floats to 8 significant digits (readable; far below any error bar)
+        rows.append([_cell(float(f"{x:.8g}") if isinstance(x, (float, np.floating)) else
+                           int(x) if isinstance(x, np.integer) else x) for x in row])
+
+    scans_tag = "_".join(s for s in scans_seen if s) or "unknown"
+    # no stamp: a rerun on the same scans overwrites (order / n_boot are in the text file)
+    stem = f"poles_{observable}_scans_{scans_tag}"
+    out_dir = Path(out_dir)
+    if not Path(win_long_path(out_dir)).is_dir():
+        raise FileNotFoundError(f"pole table: out_dir does not exist: {out_dir}")
+    csv_path = out_dir / f"{stem}.csv"
+    txt_path = out_dir / f"{stem}_bootstrap_procedure.txt"
+    with open(win_long_path(csv_path), "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(header)
+        w.writerows(rows)
+
+    t = np.asarray(records[0].t, dtype=float)
+    dt = float(np.median(np.diff(t)))
+    shots_by_scan = {}
+    for rec, _i in _records_with_pole_index(records, result, observable):
+        shots_by_scan.setdefault(_scan_tag(rec), set()).add(_shots(rec))
+    shots_txt = "; ".join(f"scan {s or '?'}: {', '.join(f'{n:,}' for n in sorted(x for x in ns if x))}"
+                          for s, ns in shots_by_scan.items())
+    desc = next((s for s in result.parameters.get("step_descriptions", [])
+                 if str(s).startswith("BootstrapStep")), "")
+    with open(win_long_path(txt_path), "w", encoding="utf-8") as f:
+        f.write(_pole_table_readme(
+            csv_name=csv_path.name, observable=observable, order=order, n_boot=n_boot,
+            scans=[s for s in scans_seen if s], n_files=len(rows), n_points=t.size,
+            t_end=float(t[-1]), dt=dt, shots_txt=shots_txt, step_desc=desc,
+            uncertainty_source=result.metadata.get("uncertainty_source"),
+            redraw=result.metadata.get("bootstrap_redraw"), lambda_source=prov["lambda_source"],
+        ))
+    print(f"\n=== Step 8 pole table ({prov['data_mode']}, {observable}, order {order}, "
+          f"{n_boot} draws) ===\n  {len(rows)} rows (scans {', '.join(scans_seen)}), "
+          f"t = 0 ... {t[-1]:.1f} us ({t.size} points)\n  CSV : {csv_path}\n  text: {txt_path}")
+    if plot:
+        _plot_pole_table(csv_path, order, prov["data_mode"])
+    return csv_path
+
+
+def _pole_table_readme(*, csv_name, observable, order, n_boot, scans, n_files, n_points,
+                       t_end, dt, shots_txt, step_desc, uncertainty_source, redraw,
+                       lambda_source) -> str:
+    """The text that sits beside the pole-table CSV: the bootstrap in numbered steps."""
+    scans_s = ", ".join(scans) if scans else "?"
+    return f"""POLES AND ERROR BARS IN {csv_name}
+=================================================================================
+
+Data: {observable} of scans {scans_s}, {n_files} files (one per drive), full record:
+{n_points} points, t = 0 to {t_end:.1f} us, {dt:.1f} us bins.  Lambda: {lambda_source}.
+Pencil order {order}.  Bootstrap: {n_boot} draws ({uncertainty_source}, around the {redraw} curve).
+
+1. Data.  {observable}(t) = probability of no click up to t, from the segment one bin
+   longer than t (the ring-down bin is never used).  Each point = count / N with
+   N = shots_per_point (repetitions x 6 axes), the same N at every t > 0.
+   N per scan: {shots_txt}.
+   The t = 0 point is 1 by construction.
+
+2. Measured fit = the central values.  Order-{order} matrix pencil on the measured curve
+   (Hankel matrix; pencil parameter L at the largest gap between singular values
+   {order} and {order + 1}).  Poles p = Re + i Im, Re in 1/us (decay rate = -Re), Im in rad/us.
+   NOT normalized: raw physical units, nothing is divided by Omega_S (Omega_DG).
+   Slots: the conjugate pair first (pole1 = -Im, pole2 = +Im), then the real poles by
+   increasing Re.  Above the EP all three are real: pole1 / pole2 continue the pair,
+   pole3 is the slow pole.
+
+3. Smooth curve.  The measured curve with its Hankel matrix cut to the {order} largest
+   SVD components (same L): S3(t).
+
+4. Copies.  {n_boot} times, every point t > 0 is redrawn as Binomial(N, S3(t)) / N
+   with the file's N; t = 0 stays 1.  One copy = one repeat with shot noise only.
+
+5. Refit.  The same pencil (same L) on every copy, poles into the same slots.
+   Copies with an aliased pole (|Im| >= 0.9 pi / dt) or a failed fit are dropped;
+   n_draws_kept = copies left.
+
+6. Per-slot bars (pole{{k}}_*_err_minus / _plus).  Per slot and per drive, the 16th and
+   84th percentile of the kept copies' Re, and separately of their Im:
+       err_minus = central - P16,   err_plus = P84 - central
+   with central = the measured fit (not the mean of the copies).  Decay bars are
+   clipped at 0, Im bars taken as absolute values.  Each bar is a percentile of its
+   own list, so near the EP (copies with a pair mixed with copies with two real
+   poles) the pole1 and pole2 bars do not come from the same copies.
+
+7. The pair_* columns (12 columns: 4 numbers, each with err_minus / err_plus).
+
+   * WHAT THE FOUR NUMBERS ARE.  pole1 and pole2 are a pair.  Instead of looking at
+     each of them alone, these four numbers describe the pair as a whole:
+         pair_centre_re    = (Re pole1 + Re pole2) / 2   the pair's position on the decay axis
+         pair_re_splitting = |Re pole1 - Re pole2| / 2   half their distance in Re
+         pair_im_splitting = |Im pole1 - Im pole2| / 2   half their distance in Im
+         pair_delta        = Re[(pole1 - pole2)^2]       the discriminant Delta
+     Below the EP the pair is complex conjugate (same Re, opposite Im), so
+     pair_centre_re = Re of both, pair_re_splitting = 0, pair_im_splitting = the
+     oscillation frequency, and pair_delta = -4 (pair_im_splitting)^2 < 0.
+     Above the EP both poles are real, so pair_im_splitting = 0,
+     pair_re_splitting = half their distance, and pair_delta = +4 (pair_re_splitting)^2 > 0.
+     pair_delta = 0 exactly at the EP; it is the quantity the EP line fit uses.
+     Example (lambda = 0.91): pole1 = -0.755 - 0.360 i, pole2 = -0.755 + 0.360 i
+     gives pair_centre_re = -0.755, pair_re_splitting = 0, pair_im_splitting = 0.360,
+     pair_delta = -0.517.
+
+   * HOW THEIR BARS ARE MADE, AND WHY THEY ARE SEPARATE FROM THE pole1 / pole2 BARS.
+     Each of the four numbers is recomputed in every one of the {n_boot} copies, giving
+     a list of {n_boot} values per number; its bar is err_minus = value - P16 and
+     err_plus = P84 - value, with P16 / P84 the 16th / 84th percentile of that list
+     and "value" the measured fit.  The difference to step 6: there, the bar of pole1
+     comes from pole1's list and the bar of pole2 from pole2's list, so near the EP,
+     where some copies give a conjugate pair and other copies give two real poles,
+     the two bars cannot tell you how the PAIR scatters (open or closed).  A pair
+     number is one value per copy, so its bar does.  These bars are not clipped: a
+     negative err_minus or err_plus means the measured value lies outside the copies'
+     16-84 band on that side, by that amount (the step-6 bars show 0 there instead).
+
+8. Columns.
+   name             file name without the common prefix
+   scan             3, 4+5, 14, ...
+   drive_kHz        Omega_BG0 drive
+   lambda           lambda of the file
+   shots_per_point  N of step 1
+   n_draws_kept     copies left of {n_boot} (step 5)
+   pole{{k}}_re / _im   measured pole k (1/us, rad/us, not normalized) + per-slot bars (step 6)
+   pair_*           pair values + bars (step 7)
+   file             the data file
+   Empty cell = no finite value.
+"""
+
+
+def _plot_pole_table(csv_path: Path, order: int, data_mode: str) -> None:
+    """Step 8's check figure, read back from the CSV: Re and Im of every pole vs λ with
+    the per-slot bars, and the pair centre / Im splitting / Δ with the pair bars."""
+    from mpm_analysis.utils.windows_paths import win_long_path
+
+    with open(win_long_path(csv_path), newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    def col(name):
+        x = np.array([float(r[name]) if r[name] != "" else np.nan for r in rows])
+        # a negative pair bar = measured value outside the draws' band: drawn as 0
+        return np.clip(x, 0, None) if "_err_" in name else x
+    lam = col("lambda")
+    scans = [r["scan"] for r in rows]
+    markers = {s: m for s, m in zip(dict.fromkeys(scans), "osD^v<>")}
+    fig, axs = plt.subplots(2, 2, figsize=(13, 8.5), sharex=True)
+    (ax_re, ax_im), (ax_c, ax_d) = axs
+    colors = ["C0", "C1", "C2", "C3"]
+    for k in range(1, order + 1):
+        for s in markers:
+            m = np.array([sc == s for sc in scans])
+            ax_re.errorbar(lam[m], col(f"pole{k}_re")[m],
+                           yerr=[col(f"pole{k}_re_err_minus")[m], col(f"pole{k}_re_err_plus")[m]],
+                           fmt=markers[s], ms=4, color=colors[k - 1], capsize=2, lw=1,
+                           label=f"pole {k}, scan {s}")
+            ax_im.errorbar(lam[m], col(f"pole{k}_im")[m],
+                           yerr=[col(f"pole{k}_im_err_minus")[m], col(f"pole{k}_im_err_plus")[m]],
+                           fmt=markers[s], ms=4, color=colors[k - 1], capsize=2, lw=1)
+    for s in markers:
+        m = np.array([sc == s for sc in scans])
+        ax_c.errorbar(lam[m], col("pair_centre_re")[m],
+                      yerr=[col("pair_centre_re_err_minus")[m], col("pair_centre_re_err_plus")[m]],
+                      fmt=markers[s], ms=4, color="C4", capsize=2, lw=1,
+                      label=f"pair centre Re, scan {s}")
+        ax_c.errorbar(lam[m], col("pair_im_splitting")[m],
+                      yerr=[col("pair_im_splitting_err_minus")[m], col("pair_im_splitting_err_plus")[m]],
+                      fmt=markers[s], ms=4, color="C5", capsize=2, lw=1,
+                      label=f"pair Im splitting, scan {s}")
+        ax_d.errorbar(lam[m], col("pair_delta")[m],
+                      yerr=[col("pair_delta_err_minus")[m], col("pair_delta_err_plus")[m]],
+                      fmt=markers[s], ms=4, color="C6", capsize=2, lw=1, label=f"scan {s}")
+    ax_d.axhline(0, color="0.4", lw=0.8)
+    ax_re.set_ylabel("Re pole (1/µs)"); ax_im.set_ylabel("Im pole (rad/µs)")
+    ax_c.set_ylabel("pair centre Re (1/µs), Im splitting (rad/µs)")
+    ax_d.set_ylabel(r"pair $\Delta$ = Re[(p1 − p2)²]")
+    for ax in (ax_c, ax_d):
+        ax.set_xlabel(r"$\lambda$")
+    for ax in axs.flat:
+        ax.grid(True, alpha=0.3, lw=0.5)
+    ax_re.legend(fontsize=7, ncol=2); ax_c.legend(fontsize=7); ax_d.legend(fontsize=7)
+    fig.suptitle(f"Pole table read back from {csv_path.name}  ({len(rows)} rows; per-slot bars "
+                 "top, pair-consistent bars bottom)", fontsize=10)
+    fig.tight_layout()
+    _show_and_save(fig, "pole_table", data_mode=data_mode)
+
+
+def _check_reference_format(path: Path) -> None:
+    """Raise unless ``path`` is laid out like the PAPER_FIT_REFERENCE files: the same
+    keys in the same order, value types, curve lengths, indent 4 + CRLF, file ending."""
+    from mpm_analysis.utils.windows_paths import win_long_path
+
+    ref_path = next(iter(sorted(PAPER_FIT_REFERENCE.glob("*_mpm_fit.json"))), None)
+    if ref_path is None:
+        raise FileNotFoundError(f"no *_mpm_fit.json in PAPER_FIT_REFERENCE = {PAPER_FIT_REFERENCE}")
+    with open(win_long_path(ref_path), "rb") as f:
+        ref = f.read()
+    with open(win_long_path(path), "rb") as f:
+        new = f.read()
+    ref_json, new_json = json.loads(ref), json.loads(new)
+    if list(new_json) != list(ref_json):
+        raise RuntimeError(f"{path.name}: keys {list(new_json)}, {ref_path.name} has {list(ref_json)}.")
+    head = b'{\r\n    "times_smooth": [\r\n        '
+    failed = [name for name, ok in (
+        ("value types", all(type(new_json[k]) is type(ref_json[k]) for k in ref_json)),
+        ("curve lengths", all(len(new_json[k]) == len(ref_json[k])
+                              for k in ("times_smooth", "fit_curve"))),
+        ("indent 4 + CRLF", new.startswith(head) and new.count(b"\n") == new.count(b"\r\n")),
+        ("file ending", new[-4:] == ref[-4:]),
+    ) if not ok]
+    if failed:
+        raise RuntimeError(f"{path.name} differs from {ref_path.name} in: {', '.join(failed)}.")
+
+
+def _plot_exported_fits(written: list, observable: str, data_mode: str) -> None:
+    """Step 7's check figure: each written file's fit_curve, read back from the
+    file, over the trace it was fitted to (log y for a positive trace)."""
+    from mpm_analysis.utils.windows_paths import win_long_path
+
+    ncols = min(len(written), 4)
+    nrows = -(-len(written) // ncols)
+    fig, axs = plt.subplots(nrows, ncols, figsize=(5.5 * ncols, 4.4 * nrows), squeeze=False)
+    for ax, (rec, path) in zip(axs.flat, written):
+        with open(win_long_path(path), encoding="utf-8") as f:
+            saved = json.load(f)
+        ax.plot(rec.t, rec.signal, "o", ms=3, color="#2a78d6", label=f"{observable} data")
+        ax.plot(saved["times_smooth"], saved["fit_curve"], color="k", lw=1.5,
+                label="fit_curve read from the file")
+        if np.all(np.asarray(rec.signal) > 0):
+            ax.set_yscale("log")
+        ax.set_title(f"{_drive_khz(rec.source_file)} kHz,  λ = {saved['lambda']:.3f}")
+        ax.set_xlabel("t (µs)")
+        ax.set_ylabel(observable)
+        ax.legend(frameon=False)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+    for ax in list(axs.flat)[len(written):]:
+        ax.set_visible(False)
+    fig.tight_layout()
+    _show_and_save(fig, f"export_{observable}", data_mode=data_mode)
 
 
 # ---- stand-alone checks ---------------------------------------------------

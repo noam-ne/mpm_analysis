@@ -139,7 +139,9 @@ def plot_survival_curves_panel(
     ax.set_ylabel(SURVIVAL_PROBABILITY_LABEL, fontsize=LABELS_FONT_SIZE)
     ax.set_xlabel(r"Time ($\mu$s)", fontsize=LABELS_FONT_SIZE, labelpad=1.0)
     if show_legend:
-        ax.legend(fontsize=LABELS_FONT_SIZE)
+        # marker-only handles: short handle + small text gap keep the box narrow
+        # (vertical spacing stays matplotlib's default)
+        ax.legend(fontsize=LABELS_FONT_SIZE, handlelength=0.8, handletextpad=0.4)
     ax.grid(False)
     make_ax_lines_wider(ax)
 
