@@ -20,8 +20,8 @@ nested under that product's clause, so it cannot run without it.  The step
 functions take keyword-only settings: a misspelt or missing argument is a
 ``TypeError`` at the call, never a silently ignored key.
 
-    RUN_FIRST_TRANSITION   post-selected survival  (scan 3-8 / 10)   → first transition
-    RUN_THIRD_TRANSITION   ensemble-average  D     (scan 0 / 1 / 50)  → third transition
+    RUN_FIRST_TRANSITION   post-selected survival  (scans 3, 14, 16) → first transition
+    RUN_THIRD_TRANSITION   ensemble-average  D     (scans 0 + 1)     → third transition
     RUN_MC_TWIN            the first-transition steps on a simulated scan (MC_RUNS)
     RUN_SIM_GRID           the first-transition steps on a simulated (λ × T) survival grid NPZ
 
@@ -43,17 +43,18 @@ Steps of a transition and what they produce:
     4  run_critical_point → sqrt_fit      sqrt fit of the splitting → lambda_c
     5  run_slider_plot    → slider        interactive per-λ trace browser with the fitted poles
                                           (the summed fit, or each term in its own colour)
-    6  run_figure         → fig           paper figure from this run's result
+    6  run_figure         → fig           appendix figure from this run's result; saved under its
+                                          paper name, with its data, in the paper's Plots/appendix
     7  run_export_figure_data → folder    per-λ fit curves in a NEW fitting_results_<stamp> folder.
-                                          third: + the result JSON, a self-contained snapshot of
-                                          the figure inputs (make_third_transition_figure.py reads
-                                          third_json and its data folder directly; it does not
-                                          need this).  first: the S_next curves of chosen drives
+                                          third: + the result JSON, in the data folder's
+                                          pole_analysis_data_for_main_text_figure — what
+                                          make_third_transition_figure.py draws the main-text
+                                          figure from.  first: the S_next curves of chosen drives
                                           in the paper data folder's format (PAPER_FIT_REFERENCE),
                                           from its own S_next load + measured fit
     8  run_pole_table    → pole_table   (first only) the three poles of every file with the
                                           bootstrap error bars as one CSV row per file (+ a text
-                                          file describing the bootstrap), in the union folder
+                                          file describing the bootstrap), in POST_SELECTED_FOLDER
 
 The third transition (ensemble average) has no state-freezing exponent — only
 steps 3 and 4 run on it.
@@ -104,7 +105,8 @@ from mpm_analysis.io.analysis_json import (
 )
 from mpm_analysis.simulation.postselected_dynamics import PostSelectedDynamicsSimulator
 from mpm_analysis.simulation.liouvillian_spectrum import LiouvillianSpectrum
-from mpm_analysis.io.experimental import EnsembleAverageLoader, PostSelectedLoader, ParityLoader  # noqa: F401  (ParityLoader: PARITY_FOLDER, data_mode="parity")
+from mpm_analysis.io.experimental import EnsembleAverageLoader, PostSelectedLoader
+from mpm_analysis.utils.windows_paths import win_long_path
 from mpm_analysis.io.simulation import load_monte_carlo_npz
 from mpm_analysis.simulation.noise import ShotNoise
 from mpm_analysis.plotting.exploratory import (
@@ -119,7 +121,8 @@ from mpm_analysis.io.file_naming import build_figure_filename, save_result
 
 DEBUG = False               # True → few files, small bootstrap, nothing saved
 SHOW_PLOTS = True       # plt.show() at the end of the run
-SAVE_FIGURES = False       # png into OUTPUT_DIR (paper figures: PDF+SVG+PNG into PAPER_FIGURES_DIR)
+SAVE_FIGURES = False       # png into OUTPUT_DIR (paper figures, step 6: PDF+SVG+PNG + their data
+                           #   into PAPER_PLOTS_DROPBOX/appendix, overwriting the paper's files)
 SAVE_FULL_ANALYSIS = False  # also write raw pole samples + refine params/cov into the result JSON
 SEED: int | None = None     # RNG seed for every bootstrap; None → OS entropy
 N_JOBS = -1                 # parallel workers for the data bootstrap (-1 → all cores)
@@ -130,112 +133,39 @@ MAX_FILES = 10 if DEBUG else None   # load only the first N λ files (debugging)
 # ===========================================================================
 # Dropbox root is auto-detected from the hostname (utils/lab_paths.py); add
 # your machine there if you get a "hostname not recognised" ValueError.
+# Both transitions read their data from the shared paper data folder.  Paths
+# under it can pass Windows' 260 characters: every folder listing and file
+# access goes through utils/windows_paths.win_long_path.
 
-_ZT = r"Common\QuantumZeno\Paper\zeno_paper_data"
-_NEW_SCAN_FOLDER = r"C:\Users\admin\Weizmann Institute Dropbox\Noam Nezer\Quantum Circuits Lab\Experiments\Zeno\CavityRecAl6\Chip_TransSap46_5\OPX\two_transmons\click_record_with_post_selected_tomography\Omega_BG0_scan"
-POST_SELECTED_DROPBOX = Path(get_lab_path(_ZT + r"\scan_experiment_results_10"))
-ENS_AVG_DROPBOX = Path(get_lab_path(_ZT + r"\scan_experiment_results_50"))
-PAPER_DATA_DROPBOX = Path(get_lab_path(_ZT))     # first-transition step 7 writes its folders here
+PAPER_DATA_DROPBOX = Path(get_lab_path(r"Common\QuantumZeno\Paper\zeno_paper_data"))
+
+# First transition — post-selected survival, scans 3, 14 and 16.  One subfolder per scan
+# (scan_exp_3, scan_exp_14, scan_exp_16: load_records loads them side by side and merges the
+# records in λ order) and hmm_lambda_per_file.csv, the HMM λ of every file.  Scan 16 is a HALF
+# record (62 segments, to 12.4 µs).  README.md in the folder describes the scans and the arrays.
+POST_SELECTED_FOLDER = PAPER_DATA_DROPBOX / "qj_union_scan_exp_3_14_16"
+
+# Third transition — ensemble-average populations, scans 0 and 1 merged per drive, with
+# hmm_rates_per_drive.csv, the HMM rates of every drive.
+ENS_AVG_FOLDER = PAPER_DATA_DROPBOX / "combined_results_0_and_1_merged"
+# ... and third-transition step 7's fitting_results_<stamp> folders: the pole analysis behind the
+# main-text figure, which run_files/make_third_transition_figure.py draws from
+THIRD_POLE_DATA_FOLDER = ENS_AVG_FOLDER / "pole_analysis_data_for_main_text_figure"
+
+# The paper's figure folder, next to the data folder.  Step 6 saves the appendix figures there
+# under their paper names (a rerun overwrites them), each with the data it shows beside it.
+PAPER_PLOTS_DROPBOX = PAPER_DATA_DROPBOX.parent / "Plots"
+
 # The S fits whose file format first-transition step 7 copies (reference_format): one
 # <scan file>_mpm_fit.json per drive, keys times_smooth / fit_curve / lambda / original_file
-PAPER_FIT_REFERENCE = POST_SELECTED_DROPBOX / "fitting_results_20251202_162520"
-PARITY_FOLDER = Path(get_lab_path(
-    _ZT + r"\click_record_repeated\Omega_BG0_scan\scan_experiment_results_12"
-))
-# Data folders actually loaded.  Local mirrors hold the same files, BUT the
-# ens_avg HMM λ table (scan-10's misfiled results.csv) is only discovered
-# inside the Dropbox tree — from the local mirror the ens_avg λ silently
-# falls back to the stored JSON value (~11 % lower), and would no longer
-# match what make_third_transition_figure.py loads for panel A.
-# All iterations of scan 8 merged per point (raw_data_tests/combine_scan8_iterations.py;
-# rerun it after more scan_iteration_* points land, it refreshes the folder)
-# First-transition dataset: name -> (folder, file-name glob).  ONE choice sets
-# both, so the subset can never point into a folder that does not hold it.
-# combined_results_4_and_5… holds scan 3 (copied in) and scans 4+5, told apart
-# by the scanner's time stamp in the file name; its own HMM table covers all
-# 41 drives, so "scan3" / "scan45" / "scan345" share one λ axis.  The λ table
-# follows the folder (LAMBDA_SOURCE_POST below).
-_COMBINED_345 = Path(_NEW_SCAN_FOLDER) / "combined_results_4_and_5__lambda_0.3-1.7__navg_11700"
+PAPER_FIT_REFERENCE = (PAPER_DATA_DROPBOX / "deprecated_first_submission_data"
+                       / "scan_experiment_results_10" / "fitting_results_20251202_162520")
+
 # First-transition critical points (step 3 Delta line, step 3c window sweep, step 4 sqrt fit, the MC
 # twin) are fitted ONLY on the λ inside this window.  29 Oct 2026, scans 3+4+5+14+16, t_max 12.4 µs:
 # (1.0, 1.5) is the most stable choice - narrower windows only enlarge the errors (the t_min = 0.2 µs
 # row deviates for every window: the bins 1-2 start-up excess).
 EP_LAMBDA_WINDOW = (1.1, 1.5)
-
-# Any SUBSET of the scans: one folder holds the combined JSONs of every scan side by side,
-# unmerged, each file at its own scan's HMM λ (raw_data_tests/build_union_folder.py; refreshed
-# by update_scan16.py).  POST_SELECTED_DATASET = "union" loads the scans listed here:
-UNION_SCANS = ("3","45","14")      # any of "3", "45" (scans 4+5), "10", "14", "16", "17", ... (later scans join automatically)
-_UNION = Path(_NEW_SCAN_FOLDER) / "union_post_selected_scans"
-# The folder prepared for sharing (raw_data_tests/export_union_scan_exp.py): one subfolder per scan,
-# scan_exp_17 = scan 17 WITHOUT scan_iteration_7 (8 iterations), S_next / S_next_x2 also stored in
-# every JSON, every subfolder with its own HMM λ table (the loader finds it per subfolder).
-# POST_SELECTED_DATASET = "scan_exp" loads the subfolders listed here side by side:
-SCAN_EXP_SCANS = ("3","14","16")   # any of "3", "4_5", "14", "16", "17"
-_SCAN_EXP = Path(_NEW_SCAN_FOLDER) / "union_scan_exp_3_4_5_14_16_17"
-
-
-def _union_files(folder: Path, scans) -> tuple[str, ...]:
-    """The data files of the chosen scans in the union folder, by the scan column of its
-    per-file λ table.  Without the folder: a pattern that matches nothing, so the load
-    step names the problem instead of the import failing."""
-    from mpm_analysis.utils.windows_paths import win_long_path
-    table = Path(folder) / "hmm_lambda_per_file.csv"
-    if not Path(win_long_path(table)).exists():
-        return ("<no union folder: run raw_data_tests/build_union_folder.py>",)
-    with open(win_long_path(table), newline="", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
-    wanted = {str(s) for s in scans}
-    unknown = sorted(wanted - {r["scan"] for r in rows})
-    if unknown:
-        raise ValueError(f"UNION_SCANS {unknown} are not in {Path(folder).name} "
-                         f"(it holds scans {sorted({r['scan'] for r in rows})}).")
-    return tuple(r["filename"] for r in rows if r["scan"] in wanted)
-
-
-POST_SELECTED_DATASETS = {
-
-    "scan3":   (_COMBINED_345, "*_15_10_2026__16_57_51.json"),   # 18 drives
-    "scan45":  (_COMBINED_345, "*_15_10_2026__10_08_55.json"),   # 23 drives
-    "scan345": (_COMBINED_345, "*.json"),                        # all 41
-    # scan 3 in its own folder: its own 18-drive HMM table, + S_pooled_strict
-    "scan3_iterations": (Path(_NEW_SCAN_FOLDER) / "scan_experiment_results_3" / "combined_iterations",
-                         "*.json"),
-    # 3+4+5 with the scan-10 boost merged in (4 boosted drives, 22 Oct stamp)
-    "scan345_boost": (Path(_NEW_SCAN_FOLDER) / "combined_results_3_4_5_and_10_boost", "*.json"),
-    # all iterations of scan 8 merged per point (raw_data_tests/combine_scan8_iterations.py)
-    "scan8": (Path(_NEW_SCAN_FOLDER) / "scan_experiment_results_8" / "combined_iterations", "*.json"),
-    # scan 14: 4 drives at the transition (1455-1570 kHz), 9 iterations x 2500 reps merged
-    # (raw_data_tests/combine_scan14_iterations.py); HMM table beside it = scan14_hmm pooled over passes
-    "scan14": (Path(_NEW_SCAN_FOLDER) / "scan_experiment_results_14" / "combined_iterations", "*.json"),
-    # scan 3 + scan 14 side by side (disjoint grids, raw_data_tests/combine_scan3_and_scan14.py);
-    # one HMM table over both scans; stamps 15_10_2026 (scan 3) / 28_10_2026 (scan 14)
-    "scan3_14": (Path(_NEW_SCAN_FOLDER) / "combined_results_3_and_14", "*.json"),
-    # scan 10 alone (3 iterations x 2500 reps merged) and scan 3 + scan 10 side by side (same script,
-    # --partner scan10); scan 10 stamp 28_10_2026__14_02_39
-    "scan10": (Path(_NEW_SCAN_FOLDER) / "scan_experiment_results_10" / "combined_iterations", "*.json"),
-    "scan3_10": (Path(_NEW_SCAN_FOLDER) / "combined_results_3_and_10", "*.json"),
-    # scan 14 merged at equal drive into the 3+4+5 points (combine_boost_into_345 with BOOST_FOLDER =
-    # scan 14; 4 drives at 34,200 reps); own 41-drive HMM table (scans 3, 4+5, 14 pooled)
-    "scan345_14": (Path(_NEW_SCAN_FOLDER) / "combined_results_3_4_5_and_14", "*.json"),
-    # scan 16: 5 drives above the transition (1570-1730 kHz), a HALF record (62 segments, to 12.4 us)
-    # at 5000 reps/iteration: its S_next has scan 14's S_next_x2 shots, and S_next_x2 = S_next there
-    # (click_record_npz.HALF_RECORD_SEGMENTS).  raw_data_tests/update_scan16.py rebuilds it from the
-    # complete iterations (rerun it after the scan adds iterations)
-    "scan16": (Path(_NEW_SCAN_FOLDER) / "scan_experiment_results_16" / "combined_iterations", "*.json"),
-    # scans 3+4+5+14 (the folder above) + scan 16 side by side: 1570 and 1650 kHz hold two points each
-    # (scan 16 next to 4+5+14 / scan 3); one HMM table over all five scans (update_scan16.py)
-    "scan345_14_16": (Path(_NEW_SCAN_FOLDER) / "combined_results_3_4_5_14_and_16", "*.json"),
-    # the scans of UNION_SCANS above, side by side, each at its own HMM λ
-    "union": (_UNION, _union_files(_UNION, UNION_SCANS)),
-    # the subfolders of SCAN_EXP_SCANS above (a tuple of folders: loaded one by one, merged in λ order)
-    "scan_exp": (tuple(_SCAN_EXP / f"scan_exp_{s}" for s in SCAN_EXP_SCANS), "*.json"),
-}
-POST_SELECTED_DATASET = "scan_exp"
-POST_SELECTED_FOLDER, POST_SELECTED_FILES = POST_SELECTED_DATASETS[POST_SELECTED_DATASET]
-
-ENS_AVG_FOLDER = Path(r"C:\Users\admin\Weizmann Institute Dropbox\Noam Nezer\Quantum Circuits Lab\Experiments\Zeno\CavityRecAl6\Chip_TransSap46_5\OPX\two_transmons\survival_probability\Omega_BG0_scan\combined_results_0_and_1_merged")
-# ENS_AVG_FOLDER = Path(r"C:\Users\admin\OneDrive - weizmann.ac.il\Msc\Zeno\Code\old_survival_data\scan_experiment_results_50")
 
 # Monte Carlo twins live in their own clause (RUN_MC_TWIN in main()) and never
 # replace the data folders above.  mpm_benchmarks/scan8/mc/run_mc.py writes
@@ -243,48 +173,18 @@ ENS_AVG_FOLDER = Path(r"C:\Users\admin\Weizmann Institute Dropbox\Noam Nezer\Qua
 # scanners' file formats, plus run_summary.json with the simulated parameters.
 MC_RUNS = Path(__file__).parent.parent.parent / "mpm_benchmarks" / "scan8" / "mc" / "runs"
 
-# λ axis.  Default: each file's stored parameters.lambda_zeno_estimation.
-# Alternatively a per-drive HMM table (hmm_rates_per_drive.csv: converged
-# offline HMM of the alpha click records, one row per drive):
-# λ = gamma_BG_per_s_mean(drive) / (2·Ω_DG), looked up exactly at each file's
-# drive — never interpolated; a drive missing from the table is an error.
-# ("auto" would search the scan tree for a run-keyed table — scan-50 only.)
-# One table per data mode; each must list every drive of the folder it is
-# applied to (exact match), so the table follows the folder choice above:
-#   scan 8 (combined_iterations / scan_iteration_*)  → scan_experiment_results_8/hmm_rates_per_drive.csv
-#       (= alpha_measurement/hmm_rates_per_drive_records01_merged.csv: alpha records 0+1 of
-#        every iteration, 71 drives; the full run is alpha_measurement/hmm_results_18_10_2026__21_33_27)
-#   scan 3 / scan 4+5 combined                        → scan_experiment_results_3/hmm_rates_per_drive.csv
-#                                                       (scan 5 drives are NOT in it → stored λ only)
-#   ens_avg scan_experiment_results_1 / _0           → newest alpha_measurement/hmm_results_*/hmm_rates_per_drive.csv
-#   (combined_results_0_and_1_merged/hmm_rates_per_drive.csv covers scans 0 and 1)
+# λ axis.  HMM_DRIVE_LAMBDA True: λ = Γ_BG / (2·Ω_DG) from the offline HMM table (converged
+# three-state HMM of the alpha click records) stored in the data folder, looked up exactly —
+# per file (first transition) / per drive (third) — never interpolated; a file or drive
+# missing from its table is an error.  False: each file's stored
+# parameters.lambda_zeno_estimation, the scanner's online estimate.
 LAMBDA_SOURCE_POST: bool | str | Path = False   # PostSelectedLoader csv_path (first transition)
 LAMBDA_SOURCE_ENS: bool | str | Path = False    # EnsembleAverageLoader csv_path (third transition)
 if (HMM_DRIVE_LAMBDA := True):
-    # the folder's own table (combined folders: merged over their source scans,
-    # raw_data_tests/merge_hmm_drive_tables.py) or the one beside it (scan folders)
-    # (a folder whose files come from scans with different HMM λ at one drive, e.g.
-    # combined_results_3_4_5_14_and_16, holds a per-FILE table instead: hmm_lambda_per_file.csv)
-    # (several folders, "scan_exp": "auto" = each subfolder's own hmm_lambda_per_file.csv, found
-    # by the loader per folder; a folder without one would fall back to the stored JSON λ, so
-    # load_records checks that every folder got its table)
-    LAMBDA_SOURCE_POST = "auto" if isinstance(POST_SELECTED_FOLDER, tuple) else next(
-        (p for p in (Path(POST_SELECTED_FOLDER) / "hmm_lambda_per_file.csv",
-                     Path(POST_SELECTED_FOLDER) / "hmm_rates_per_drive.csv",
-                     Path(POST_SELECTED_FOLDER).parent / "hmm_rates_per_drive.csv")
-         if p.exists()),
-        Path(POST_SELECTED_FOLDER).parent / "hmm_rates_per_drive.csv",   # missing → loader error names it
-    )
-    # ens_avg scans keep the HMM run beside the alpha records: newest stamp wins
-    LAMBDA_SOURCE_ENS = next(
-        (p for p in [Path(ENS_AVG_FOLDER) / "hmm_rates_per_drive.csv"]
-         + sorted((Path(ENS_AVG_FOLDER) / "alpha_measurement").glob("hmm_results_*/hmm_rates_per_drive.csv"),
-                  key=lambda p: p.stat().st_mtime, reverse=True)
-         if p.exists()),
-        Path(ENS_AVG_FOLDER) / "hmm_rates_per_drive.csv",                 # missing → loader error names it
-    )
+    LAMBDA_SOURCE_POST = POST_SELECTED_FOLDER / "hmm_lambda_per_file.csv"
+    LAMBDA_SOURCE_ENS = ENS_AVG_FOLDER / "hmm_rates_per_drive.csv"
 OUTPUT_DIR = Path(__file__).parent.parent / "mpm_analysis_output"
-PAPER_FIGURES_DIR = Path(__file__).parent.parent / "paper_figures"
+PAPER_FIGURES_DIR = Path(__file__).parent.parent / "paper_figures"   # local drafts (make_appendix_options.py)
 PAPER_FIGURES_DPI = 600
 
 
@@ -311,7 +211,6 @@ def main() -> None:
         #        source, drop_first_point) is stamped in for the result JSON.
         first_records = load_records(
             PostSelectedLoader(csv_path=LAMBDA_SOURCE_POST), POST_SELECTED_FOLDER,
-            file_glob=POST_SELECTED_FILES,  # files of the folder (POST_SELECTED_DATASET above)
             data_mode="post_selected",      # tag written into the result JSON / file names
             observables= ["S_next_x2"],  # keys to load; 1 key → classic MPM, >1 → joint
                                             # keys to load; 1 key → classic MPM, >1 → joint
@@ -357,7 +256,6 @@ def main() -> None:
         if (FIRST_TOMOGRAPHY := False):
             first_tomo = load_records(
                 PostSelectedLoader(csv_path=LAMBDA_SOURCE_POST), POST_SELECTED_FOLDER,
-                file_glob=POST_SELECTED_FILES,
                 data_mode="post_selected",
                 observables=["S", "X_cond", "Z_cond"],
                 lambda_range=(0, 1.6),
@@ -567,11 +465,13 @@ def main() -> None:
             #   "sqrt"         → 3 panels: A spectrum, B Im splitting + a sqrt
             #                    overlay chosen by splitting_fit, C by panel_c
             #   The Delta line and λ_EP drawn ARE step 3's fit (first_ep), not a refit.
-            #   in : first_result, first_ep
-            #   out: first_fig (PDF+SVG+PNG into PAPER_FIGURES_DIR if SAVE_FIGURES)
+            #   in : first_result, first_ep (+ first_json, copied beside the figure as its data)
+            #   out: first_fig (with SAVE_FIGURES: PAPER_PLOTS_DROPBOX/appendix/<figure_name>
+            #        .pdf/.svg/.png + <figure_name>_data.json, overwriting the paper's files)
             if (FIRST_FIGURE := True):
                 first_fig = run_figure(
-                    first_result, first_ep,
+                    first_result, first_ep, json_path=first_json,
+                    figure_name="first_transition_appendix",   # file name in Plots/appendix
                     layout="sqrt",                      # appendix: A decay rates, B Im splitting +
                                                         #   black √ of step 3's Δ line, C (panel_c)
                     panel_c="discriminant",             # C: "discriminant" → (Δe12)²/Ω_S² = Δ/(4 Ω_S²)
@@ -595,8 +495,8 @@ def main() -> None:
 
             # Step 8 — pole table: the three poles of every file (central value =
             # the measured fit, error bars = step 2's bootstrap 16/84 half-widths)
-            # as ONE CSV row per file, written into the union folder next to the
-            # data, with a text file that describes the bootstrap in plain steps.
+            # as ONE CSV row per file, written into the data folder next to the
+            # scan subfolders, with a text file that describes the bootstrap in plain steps.
             # Per-slot bars (each pole's Re and Im on its own) AND pair-consistent
             # bars (pair centre, Re/Im splitting, Delta: one number per draw).
             # Run on the FULL S_next record, all 24.8 µs (t_range=None in step 1:
@@ -606,13 +506,13 @@ def main() -> None:
             if (FIRST_POLE_TABLE := False):
                 first_pole_table = run_pole_table(
                     first_records, first_result,
-                    out_dir=_SCAN_EXP,              # the shared scan_exp folder (user moved the
-                                                    #   3 Nov table there; a rerun overwrites it)
+                    out_dir=POST_SELECTED_FOLDER,   # the data folder (a rerun on the same scans
+                                                    #   overwrites the table)
                     observable="S_next",            # the trace the poles describe (step 1's key)
                 )
 
         # Step 7 — S_next fit curves for the paper data folder, in the format of
-        # PAPER_FIT_REFERENCE (zeno_paper_data/scan_experiment_results_10/
+        # PAPER_FIT_REFERENCE (the first submission's
         # fitting_results_20251202_162520: one <scan file>_mpm_fit.json per drive
         # holding times_smooth / fit_curve / lambda / original_file, nothing else),
         # written into a NEW PAPER_DATA_DROPBOX/fitting_results_<UTC stamp>/ folder
@@ -622,12 +522,11 @@ def main() -> None:
         # no result JSON or spectrum figure.  The figure: each file's fit_curve,
         # read back from the file, over its S_next trace.  Off by default: every
         # run adds a folder to the shared paper folder.
-        #   in : POST_SELECTED_FOLDER / POST_SELECTED_FILES (step 1's files)
+        #   in : POST_SELECTED_FOLDER (step 1's files)
         #   out: first_export_dir
         if (FIRST_EXPORT := False):
             export_records = load_records(
                 PostSelectedLoader(csv_path=LAMBDA_SOURCE_POST), POST_SELECTED_FOLDER,
-                file_glob=POST_SELECTED_FILES,
                 data_mode="post_selected",
                 observables=["S_next"],         # the trace the curves describe
                 lambda_range=None,              # every λ; step 7 keeps drives_khz
@@ -725,7 +624,8 @@ def main() -> None:
             # Step 6 — paper figure (Delta line + λ_EP = step 3's).   out: third_fig
             if (THIRD_FIGURE := True):
                 third_fig = run_figure(
-                    third_result, third_ep,
+                    third_result, third_ep, json_path=third_json,
+                    figure_name="third_transition_appendix",   # file name in Plots/appendix
                     layout="sqrt",                  # as FIRST: A decay rates, B Im splitting, C (panel_c)
                     panel_c="discriminant",         # C: (Δe12)²/Ω_S² at every λ + step 3's line | "real"
                     lambda_max=1.35,
@@ -741,11 +641,12 @@ def main() -> None:
                     crit_line_decimals=3,           # λ_EP line drawn at the quoted value (1.085)
                 )
 
-            # Step 7 — snapshot of the figure inputs, written into a NEW
+            # Step 7 — the pole analysis behind the main-text figure, written into a NEW
             # <parent>/fitting_results_<UTC stamp>/  folder (old folders are never
-            # touched).  run_files/make_third_transition_figure.py does not need it:
-            # it draws the newest third_json and reloads that run's data itself.
-            #   mpm_analysis_results_*.json      panel B — third_json as it stands now
+            # touched).  run_files/make_third_transition_figure.py draws the figure from
+            # the result JSON of the folder its RESULT_JSON names (None → the newest) and
+            # reloads the traces from ENS_AVG_FOLDER.
+            #   mpm_ens_avg_*.json               panel B — third_json as it stands now
             #                                    (with the sqrt fit if step 4 ran)
             #   <scan file>_mpm_fit.json         panel A — one per λ: the modal fit
             #                                    Σ A_k exp(p_k t) of `observable` on a
@@ -758,7 +659,9 @@ def main() -> None:
             if (THIRD_EXPORT := True):
                 third_export_dir = run_export_figure_data(
                     third_records, third_result, json_path=third_json,
-                    parent=ENS_AVG_DROPBOX,     # where the figure script reads from
+                    parent=THIRD_POLE_DATA_FOLDER,  # → …/pole_analysis_data_for_main_text_figure/
+                                                #   fitting_results_<stamp>/, where the figure
+                                                #   script reads the result JSON from
                     observable="D",             # trace the fit curve describes — must be
                                                 #   what panel A plots: the loader's
                                                 #   "survival" key = D_probability
@@ -1107,13 +1010,18 @@ def load_records(
     writes into the result JSON.  ``t_range = (t_min, t_max)`` in µs keeps
     only ``t_min <= t <= t_max`` (either end ``None`` → open); ``None`` keeps
     the full record.  ``file_glob`` keeps only the files whose name matches
-    (one source run of a merged folder, POST_SELECTED_SUBSETS); a tuple of
-    globs / file names keeps their union (POST_SELECTED_DATASET = "union").
-    ``MAX_FILES`` (global) caps the number of files.  ``folder`` may be a tuple / list of
-    folders (POST_SELECTED_DATASET = "scan_exp": one subfolder per scan): each is loaded on its
-    own, with its own λ table, and the records are merged in λ order; the provenance then lists
-    every folder and each record keeps its own (``_FILE_FOLDER``).
+    (one source run of a merged folder); a tuple of globs / file names keeps
+    their union.  ``MAX_FILES`` (global) caps the number of files.  A ``folder`` that holds
+    ``scan_exp_<scan>`` subfolders (POST_SELECTED_FOLDER: one subfolder per scan), or a
+    tuple / list of folders: each is loaded on its own and the records are merged in λ order;
+    the provenance then lists every folder and each record keeps its own (``_FILE_FOLDER``).
     """
+    if not isinstance(folder, (list, tuple)):
+        # one subfolder per scan → load them side by side, in scan order (3, 14, 16)
+        scans = [Path(folder) / p.name for p in Path(win_long_path(folder)).glob("scan_exp_*")
+                 if p.is_dir()]
+        if scans:
+            folder = sorted(scans, key=lambda p: int(re.search(r"\d+", p.name).group()))
     if isinstance(folder, (list, tuple)):
         records = []
         for f in folder:
@@ -1134,16 +1042,16 @@ def load_records(
         print(f"  merged {len(records)} records from {len(folder)} folders")
         return records
     folder = Path(folder)
-    if not folder.exists():
+    if not Path(win_long_path(folder)).exists():
         raise FileNotFoundError(f"[{data_mode}] folder not found: {folder}")
-    names = [p.name for p in folder.glob("*.json")]
+    names = [p.name for p in Path(win_long_path(folder)).glob("*.json")]
     patterns = (file_glob,) if isinstance(file_glob, str) else tuple(file_glob)
     if not any(fnmatch.fnmatch(n, p) for n in names for p in patterns):
         stamps = sorted({m.group(1) for n in names
                          if (m := re.search(r"_kHz_(.+)\.json$", n))})
         raise FileNotFoundError(
             f"[{data_mode}] no file in {folder} matches {patterns[:3]!r}; the file stamps "
-            f"there are {stamps}.  POST_SELECTED_DATASETS pairs each subset with its folder.")
+            f"there are {stamps}.")
     observables = list(observables)
     if t_range is None:
         t_min = t_max = None
@@ -1946,6 +1854,8 @@ def run_slider_plot(
 
 def run_figure(
     result: ZenoAnalysisResult, ep: dict, *,
+    json_path: Path | None,
+    figure_name: str,
     layout: str,
     lambda_max: float,
     fit_validity: float | None,
@@ -1977,13 +1887,15 @@ def run_figure(
     the value as the paper quotes it (2 → 1.30) — in every panel; None →
     unrounded.  The dashed curves still end at the fit's own zero.
     Returns the figure, or ``None`` when the sqrt fit is missing.  With
-    SAVE_FIGURES: PDF + SVG + high-res PNG into PAPER_FIGURES_DIR.
+    SAVE_FIGURES: ``<figure_name>.pdf`` / ``.svg`` / ``.png`` (high-res) into
+    PAPER_PLOTS_DROPBOX/appendix — the paper's file names, so a rerun overwrites
+    them — and the data the figure shows beside it as ``<figure_name>_data.json``:
+    a copy of ``json_path``, this run's result JSON with step 3's line appended.
     """
     from mpm_analysis.plotting.paper_figures.first_transition_main import (
         plot_first_transition_figure,
     )
-    data_mode, scan_number = _result_tags(result)
-    observables, order = _observables(result), _order(result)
+    data_mode, observables = _result_tags(result)[0], _observables(result)
     print(f"\n=== Paper figure ({data_mode}, {'+'.join(observables)}, {layout}) ===")
     if (layout == "sqrt" and splitting_fit == "sqrt"
             and getattr(result, "critical_point_sqrt_fit", None) is None):
@@ -2005,18 +1917,16 @@ def run_figure(
         error_alpha=error_bar_alpha,
         crit_line_decimals=crit_line_decimals,
     )
-    # Paper figures: own folder, PDF + SVG + high-res PNG, stem naming the
-    # layout, data mode, scan, observables and order + UTC stamp.
+    # Paper figures: the shared plots folder, PDF + SVG + high-res PNG under the
+    # paper's file name, and the result JSON the figure was drawn from beside it.
     if SAVE_FIGURES and not DEBUG:
         from mpm_analysis.utils.windows_paths import save_figure_pdf_svg
-        layout_tag = "sqrt_from_disc" if (layout, splitting_fit) == ("sqrt", "discriminant") else layout
-        if layout == "sqrt" and panel_c == "discriminant":
-            layout_tag += "_c_disc"
-        stem = build_figure_filename(
-            figure_tag=f"transition_{layout_tag}_{'+'.join(observables)}_order{order}",
-            data_mode=data_mode, scan_number=scan_number, extension="",
-        ).rstrip(".")
-        save_figure_pdf_svg(fig, stem, PAPER_FIGURES_DIR, dpi=PAPER_FIGURES_DPI, png=True)
+        out_dir = PAPER_PLOTS_DROPBOX / "appendix"
+        save_figure_pdf_svg(fig, figure_name, out_dir, dpi=PAPER_FIGURES_DPI, png=True)
+        if json_path is not None:
+            data_path = out_dir / f"{figure_name}_data.json"
+            shutil.copy2(win_long_path(json_path), win_long_path(data_path))
+            print(f"  Data: {data_path}  (= {Path(json_path).name})")
     if SHOW_PLOTS:
         plt.show(block=False)
     return fig
@@ -2070,7 +1980,7 @@ def run_export_figure_data(
                              f"in {prov['source_folder']}.")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     out = Path(parent) / f"fitting_results_{stamp}"
-    out.mkdir(parents=True, exist_ok=False)
+    Path(win_long_path(out)).mkdir(parents=True, exist_ok=False)
     print(f"\n=== Step 7 export ({prov['data_mode']}, {observable}) ===")
 
     result_name = None
@@ -2078,7 +1988,8 @@ def run_export_figure_data(
         # Panel B: the result JSON (already augmented with the sqrt fit if the
         # critical point ran; DEBUG never saved one, so save a fresh copy here).
         if json_path is not None:
-            result_name = Path(shutil.copy2(json_path, out / Path(json_path).name)).name
+            result_name = Path(json_path).name
+            shutil.copy2(win_long_path(json_path), win_long_path(out / result_name))
         else:
             result_name = save_result(result, out, full=False).name
         print(f"  {result_name}")

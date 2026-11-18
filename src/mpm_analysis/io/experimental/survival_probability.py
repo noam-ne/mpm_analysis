@@ -704,7 +704,7 @@ class PostSelectedLoader(ExperimentalLoader):
         return out
 
     def _discover_files(self, folder: Path) -> list[Path]:
-        return sorted(folder.glob("*.json"), key=lambda fp: _safe_lambda(fp))
+        return sorted(_long_glob(folder, "*.json"), key=lambda fp: _safe_lambda(fp))
 
     def _extract_lambda_and_time(self, jd: dict, fp: Path) -> tuple[float, np.ndarray]:
         t = _read_time_us(jd)
@@ -829,7 +829,7 @@ class EnsembleAverageLoader(ExperimentalLoader):
         }
 
     def _discover_files(self, folder: Path) -> list[Path]:
-        return sorted(folder.glob("*.json"), key=lambda fp: _safe_lambda(fp))
+        return sorted(_long_glob(folder, "*.json"), key=lambda fp: _safe_lambda(fp))
 
     def _extract_lambda_and_time(self, jd: dict, fp: Path) -> tuple[float, np.ndarray]:
         return _resolve_lambda(self, jd, fp), _read_time_us(jd)
