@@ -419,7 +419,7 @@ def main() -> None:
           + (f" +/- {ep['lambda_ep_error']:.4f}" if ep["lambda_ep_error"] is not None else "")
           + " ===")
     for i, name in enumerate(OPTIONS):
-        fig = run.run_figure(result, ep, **fig_kwargs)
+        fig = run.run_figure(result, ep, json_path=None, **fig_kwargs)
         insets = build_option(fig, OPTION_LAYOUTS[name], view, error_alpha=error_alpha, full_view=full_view)
         problems = check_layout(fig, insets)
         print(f"\n[opt{i}_{name}] layout check: "
