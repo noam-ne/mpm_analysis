@@ -31,7 +31,7 @@ from pathlib import Path
 
 from mpm_analysis.pipeline.kspace_pipeline import KSpacePipeline, _open_paths
 from mpm_analysis.pipeline.click_correlation_pipeline import ClickCorrelationPipeline
-from mpm_analysis.utils.lab_paths import get_lab_path
+from mpm_analysis.utils.lab_paths import get_named_path
 
 # ===========================================================================
 # SETTINGS
@@ -49,11 +49,7 @@ SIMULATED_NPZ = Path(r"click_record_raw_20260730_131459.npz")
 if SOURCE == "simulated":
     FOLDER = SIMULATED_NPZ
 else:
-    _SCAN = get_lab_path(
-        "Experiments", "Zeno", "CavityRecAl6", "Chip_TransSap46_5", "OPX",
-        "two_transmons", "click_record_repeated", "Omega_BG0_scan",
-        f"scan_experiment_results_{SCAN_NUMBER}",
-    )
+    _SCAN = get_named_path("click_record_scans") / f"scan_experiment_results_{SCAN_NUMBER}"
     # json source reads the scan folder directly; compressed source reads the
     # compressed_click_analysis subfolder produced by run_kspace_preprocessing.py.
     FOLDER = _SCAN if SOURCE == "json" else _SCAN / "compressed_click_analysis"

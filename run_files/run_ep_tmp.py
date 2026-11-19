@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from mpm_analysis.utils.lab_paths import get_lab_path
+from mpm_analysis.utils.lab_paths import get_named_path
 
 # ===========================================================================
 # GLOBAL SETTINGS
@@ -83,27 +83,19 @@ if DEBUG:
 # ===========================================================================
 # PATHS
 # ===========================================================================
-# Dropbox root is auto-detected from the current hostname — see
-# utils/lab_paths.py.  Add your machine there if you get a "hostname not
-# recognised" ValueError.
-
-_ZT = r"Common\QuantumZeno\Paper\zeno_paper_data"
+# Lab paths are stored by name in mpm_analysis/config/paths.json (read with
+# get_named_path, utils/lab_paths.py).  The Dropbox root is picked there from
+# the hostname; add your machine to the JSON if you get a "hostname not in
+# dropbox_roots" ValueError.
 
 # ---- Ensemble-average scan ----
-ENS_AVG_FOLDER = get_lab_path(
-    _ZT+
-    r"\scan_experiment_results_50",
-)
+ENS_AVG_FOLDER = get_named_path("paper_data") / "scan_experiment_results_50"
 
 # ---- Post-selected scan ----
-_PS = r"Common\QuantumZeno\Paper\zeno_paper_data\scan_experiment_results_10"
-
-_PARITY = _ZT + r"\click_record_repeated\Omega_BG0_scan\scan_experiment_results_12"
-
-# POST_SELECTED_FOLDER = get_lab_path(_PS)
+# POST_SELECTED_FOLDER = get_named_path("paper_data") / "scan_experiment_results_10"
 POST_SELECTED_FOLDER = r"C:\Users\admin\OneDrive - weizmann.ac.il\Msc\Zeno\Code\old data\scan_experiment_results_10"
 ENS_AVG_FOLDER = r"C:\Users\admin\OneDrive - weizmann.ac.il\Msc\Zeno\Code\old_survival_data\scan_experiment_results_50"
-PARITY_FOLDER = get_lab_path(_PARITY)
+PARITY_FOLDER = get_named_path("paper_click_record_scans") / "scan_experiment_results_12"
 # ---- Lambda scale (both data modes) ----
 # The loader finds the HMM table that provably belongs to the folder being
 # loaded — matched on the full run id (drive frequency AND timestamp), so a

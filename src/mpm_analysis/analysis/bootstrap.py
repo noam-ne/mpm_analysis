@@ -281,7 +281,7 @@ _POST_SELECTED_SURVIVAL = {
     # both) — same histogram, same draw; points independent.
     "S_next": ("S_next", "N_attempts_S_next"),
     "S_next_far": ("S_next_far", "N_attempts_S_next_far"),
-    "S_next_x2": ("S_next_x2", "N_attempts_S_next_x2"),
+    "p_0_t": ("p_0_t", "N_attempts_p_0_t"),
 }
 
 
@@ -321,7 +321,7 @@ def _resample_pooled_survival(
 
     ``key`` picks the curve: ``"S_pooled"`` (every segment ``L >= i``),
     ``"S_pooled_strict"`` (``L > i``) or ``"S_next"`` / ``"S_next_far"`` /
-    ``"S_next_x2"`` (the named segments ``L = i + 1`` and/or
+    ``"p_0_t"`` (the named segments ``L = i + 1`` and/or
     ``i + 1 + n_seg // 2``).  ``draw`` is a histogram resample
     already made in this bootstrap iteration (``_draw_pooled_counts``), so
     every curve of a joint fit comes from the same resampled shots; ``None``
@@ -590,7 +590,7 @@ def _svd_truncated_stats(stats: dict, key: str, t: np.ndarray, y: np.ndarray,
 
     * ``post_selected`` — survival curves whose points come from separate
       shots (one segment per point: ``S``, ``S_next``, ``S_next_far``,
-      ``S_next_x2``, ``SX`` …; the pooled curves share shots between points,
+      ``p_0_t``, ``SX`` …; the pooled curves share shots between points,
       and a per-point draw would drop that correlation): ``Binomial(N_t,
       S3(t))`` per point (:func:`bootstrap_svd_truncated_measurements`), the
       ``t = 0`` anchor around its measured value.
@@ -623,7 +623,7 @@ def _svd_truncated_stats(stats: dict, key: str, t: np.ndarray, y: np.ndarray,
             or key in ("S_pooled", "S_pooled_strict")):
         raise ValueError(
             f"redraw_around='svd_truncated' needs one post_selected survival curve with "
-            f"independent points (S, S_next, S_next_far, S_next_x2, SX, SZ ...) or one "
+            f"independent points (S, S_next, S_next_far, p_0_t, SX, SZ ...) or one "
             f"ens_avg population (D, G, B, error), got '{key}' ({stats.get('data_mode')}).")
     _, n_field = _POST_SELECTED_SURVIVAL[key]
     n = np.broadcast_to(np.asarray(stats[n_field], dtype=np.int64), y.shape).copy()

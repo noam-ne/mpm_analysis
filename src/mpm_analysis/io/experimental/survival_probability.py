@@ -359,7 +359,7 @@ def _phase_survival(jd: dict) -> np.ndarray:
 
 # Survivals computed here from the first-click histogram (no JSON array of
 # their own): one named segment per point, see click_record_npz.HISTOGRAM_SURVIVALS.
-_NEXT_KEYS = ("S_next", "S_next_far", "S_next_x2")
+_NEXT_KEYS = ("S_next", "S_next_far", "p_0_t")
 
 
 def _first_click_histogram(data: dict) -> np.ndarray | None:
@@ -415,8 +415,13 @@ class PostSelectedLoader(ExperimentalLoader):
         ``"S_next"``        <- segment L = i + 1 only, from the first-click
                                histogram (no ring-down bin, shots of S)
         ``"S_next_far"``    <- segment L = i + 1 + n_seg//2 only
-        ``"S_next_x2"``     <- both (2x shots, half the record; on a half
-                               record such as scan 16 it is S_next)
+        ``"p_0_t"``         <- both (2x shots, half the record; on a half
+                               record such as scan 16 it is S_next).  The
+                               paper's no-click probability; the data files
+                               store it as ``data.p_0_t_array_next_x2``.  NOT
+                               the files' ``data.p_0_t_array``, which is
+                               ``"S"``.  (Called ``"S_next_x2"`` before
+                               19 Nov 2026.)
         ``"SZ"`` / ``"SX"`` <- survival of the z / phase tomography runs
         ``"Z"``, ``"X"``, ``"Y"``  <- SZ·<Z>, SX·<X>, SX·<Y>  (unnormalised
                                Bloch components — the 3x3-generator variables
@@ -458,11 +463,11 @@ class PostSelectedLoader(ExperimentalLoader):
     point ``i`` from the segment one bin longer (``L = i + 1``), so no point
     contains a record-ending bin while every point keeps the stored S's shots
     and the points stay independent (record ends at ``i = n_seg - 1``).
-    ``S_next_far`` uses ``L = i + 1 + n_seg//2`` and ``S_next_x2`` both —
+    ``S_next_far`` uses ``L = i + 1 + n_seg//2`` and ``p_0_t`` both —
     disjoint segment sets, 2x shots, record ending at ``i = n_seg - 1 -
     n_seg//2``.  The halves follow previous records of different length
     (initialization history), so check ``S_next`` vs ``S_next_far`` before
-    trusting ``S_next_x2`` (mpm_analysis_output/s_next_ringdown_20261026).
+    trusting ``p_0_t`` (mpm_analysis_output/s_next_ringdown_20261026).
     All three are computed from ``first_click_counts`` (no JSON array);
     multinomial data bootstrap as above, and the ``errorbar`` bootstrap gets
     their binomial sigma (independent points).

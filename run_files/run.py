@@ -80,7 +80,7 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 
-from mpm_analysis.utils.lab_paths import get_lab_path
+from mpm_analysis.utils.lab_paths import get_named_path
 from mpm_analysis.pipeline.mpm_pipeline import MPMPipeline
 from mpm_analysis.pipeline.critical_point_pipeline import CriticalPointPipeline
 from mpm_analysis.pipeline.benchmark_pipeline import BenchmarkPipeline
@@ -114,6 +114,7 @@ from mpm_analysis.plotting.exploratory import (
     plot_spectrum_panels, plot_time_traces_slider, plot_svd_singular_values,
 )
 from mpm_analysis.plotting.paper_figures.appendix_bootstrap import plot_appendix_bootstrap
+from mpm_analysis.plotting._style import DPI as PAPER_STYLE_DPI
 from mpm_analysis.io.file_naming import build_figure_filename, save_result
 from mpm_analysis.pipeline import transition_steps as _steps
 from mpm_analysis.pipeline.transition_steps import (   # these read no setting of this file
@@ -137,35 +138,36 @@ MAX_FILES = 10 if DEBUG else None   # load only the first N λ files (debugging)
 # ===========================================================================
 # PATHS
 # ===========================================================================
-# Dropbox root is auto-detected from the hostname (utils/lab_paths.py); add
-# your machine there if you get a "hostname not recognised" ValueError.
+# Every lab path is stored by name in mpm_analysis/config/paths.json and read with
+# get_named_path (utils/lab_paths.py).  The Dropbox root is picked there from the
+# hostname; add your machine to the JSON if you get a "hostname not in
+# dropbox_roots" ValueError.
 # Both transitions read their data from the shared paper data folder.  Paths
 # under it can pass Windows' 260 characters: every folder listing and file
 # access goes through utils/windows_paths.win_long_path.
 
-PAPER_DATA_DROPBOX = Path(get_lab_path(r"Common\QuantumZeno\Paper\zeno_paper_data"))
+PAPER_DATA_DROPBOX = get_named_path("paper_data")
 
 # First transition — post-selected survival, scans 3, 14 and 16.  One subfolder per scan
 # (scan_exp_3, scan_exp_14, scan_exp_16: load_records loads them side by side and merges the
 # records in λ order) and hmm_lambda_per_file.csv, the HMM λ of every file.  Scan 16 is a HALF
 # record (62 segments, to 12.4 µs).  README.md in the folder describes the scans and the arrays.
-POST_SELECTED_FOLDER = PAPER_DATA_DROPBOX / "qj_union_scan_exp_3_14_16"
+POST_SELECTED_FOLDER = get_named_path("first_transition_data")   # qj_union_scan_exp_3_14_16
 
 # Third transition — ensemble-average populations, scans 0 and 1 merged per drive, with
 # hmm_rates_per_drive.csv, the HMM rates of every drive.
-ENS_AVG_FOLDER = PAPER_DATA_DROPBOX / "combined_results_0_and_1_merged"
+ENS_AVG_FOLDER = get_named_path("third_transition_data")   # combined_results_0_and_1_merged
 # ... and third-transition step 7's fitting_results_<stamp> folders: the pole analysis behind the
 # main-text figure, which run_files/make_third_transition_figure.py draws from
-THIRD_POLE_DATA_FOLDER = ENS_AVG_FOLDER / "pole_analysis_data_for_main_text_figure"
+THIRD_POLE_DATA_FOLDER = get_named_path("third_transition_pole_data")
 
 # The paper's figure folder, next to the data folder.  Step 6 saves the appendix figures there
 # under their paper names (a rerun overwrites them), each with the data it shows beside it.
-PAPER_PLOTS_DROPBOX = PAPER_DATA_DROPBOX.parent / "Plots"
+PAPER_PLOTS_DROPBOX = get_named_path("paper_plots")
 
 # The S fits whose file format first-transition step 7 copies (reference_format): one
 # <scan file>_mpm_fit.json per drive, keys times_smooth / fit_curve / lambda / original_file
-PAPER_FIT_REFERENCE = (PAPER_DATA_DROPBOX / "deprecated_first_submission_data"
-                       / "scan_experiment_results_10" / "fitting_results_20251202_162520")
+PAPER_FIT_REFERENCE = get_named_path("paper_fit_reference")
 
 # First-transition critical points (step 3 Delta line, step 3c window sweep, step 4 sqrt fit, the MC
 # twin) are fitted ONLY on the λ inside this window.  29 Oct 2026, scans 3+4+5+14+16, t_max 12.4 µs:
@@ -187,11 +189,11 @@ MC_RUNS = Path(__file__).parent.parent.parent / "mpm_benchmarks" / "scan8" / "mc
 LAMBDA_SOURCE_POST: bool | str | Path = False   # PostSelectedLoader csv_path (first transition)
 LAMBDA_SOURCE_ENS: bool | str | Path = False    # EnsembleAverageLoader csv_path (third transition)
 if (HMM_DRIVE_LAMBDA := True):
-    LAMBDA_SOURCE_POST = POST_SELECTED_FOLDER / "hmm_lambda_per_file.csv"
-    LAMBDA_SOURCE_ENS = ENS_AVG_FOLDER / "hmm_rates_per_drive.csv"
+    LAMBDA_SOURCE_POST = get_named_path("first_transition_lambda_table")   # hmm_lambda_per_file.csv
+    LAMBDA_SOURCE_ENS = get_named_path("third_transition_lambda_table")    # hmm_rates_per_drive.csv
 OUTPUT_DIR = Path(__file__).parent.parent / "mpm_analysis_output"
 PAPER_FIGURES_DIR = Path(__file__).parent.parent / "paper_figures"   # local drafts (make_appendix_options.py)
-PAPER_FIGURES_DPI = 600
+PAPER_FIGURES_DPI = PAPER_STYLE_DPI   # mpm_analysis/config/plotting_params.json ("dpi")
 
 
 # ===========================================================================
@@ -218,7 +220,7 @@ def main() -> None:
         first_records = load_records(
             PostSelectedLoader(csv_path=LAMBDA_SOURCE_POST), POST_SELECTED_FOLDER,
             data_mode="post_selected",      # tag written into the result JSON / file names
-            observables= ["S_next_x2"],  # keys to load; 1 key → classic MPM, >1 → joint
+            observables= ["p_0_t"],  # keys to load; 1 key → classic MPM, >1 → joint
                                             # keys to load; 1 key → classic MPM, >1 → joint
                                             #   MPM (common poles, per-observable amplitudes).
                                             #   post_selected: "S" (stored p_0_t_array),
@@ -232,7 +234,7 @@ def main() -> None:
                                             #   longer only: no ring-down bin, the shots of S,
                                             #   independent points; computed from the JSON's
                                             #   first-click histogram), "S_next_far" (segment
-                                            #   i+1+N//2), "S_next_x2" (both: 2x shots, record
+                                            #   i+1+N//2), "p_0_t" (both: 2x shots, record
                                             #   ends at ~12.4 us; halves differ ~1e-3 early by
                                             #   init history — s_next_ringdown_20261026; on a
                                             #   half record, scan 16, it is that record's S_next),
@@ -457,7 +459,7 @@ def main() -> None:
                 first_slider = run_slider_plot(
                     first_records, first_result,
                     scales={"S": "log", "S_pooled": "log", "S_pooled_strict": "log",
-                            "S_next": "log", "S_next_far": "log", "S_next_x2": "log"},   # key → "log"/"linear"
+                            "S_next": "log", "S_next_far": "log", "p_0_t": "log"},   # key → "log"/"linear"
                     take_abs=False,         # plot/fit |signal| (e.g. for parity)
                     components=True,        # True: each term A_k·exp(p_k·t) of the fit over the
                                             #   data instead of the summed fit, named and coloured

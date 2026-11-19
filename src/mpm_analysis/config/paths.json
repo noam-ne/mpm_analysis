@@ -1,0 +1,22 @@
+{
+  "_about": "Every lab path mpm_analysis uses. dropbox_roots: hostname -> this machine's 'Quantum Circuits Lab' Dropbox folder. paths: name -> path under that folder. Read through mpm_analysis.utils.lab_paths.get_named_path(name). To add a machine: python -c \"import socket; print(socket.gethostname())\" and add a line to dropbox_roots.",
+  "dropbox_roots": {
+    "DESKTOP-BAEVOT2": "C:/Users/admin/Weizmann Institute Dropbox/Noam Nezer/Quantum Circuits Lab",
+    "DESKTOP-FQN6OUI": "C:/Users/dango/Weizmann Institute Dropbox/Danielle Gov/Quantum Circuits Lab",
+    "CMD-SRStudent1": "E:/Weizmann Institute Dropbox/Barkay Guttel/Quantum Circuits Lab",
+    "cmd-SRLenovoPc2": "E:/Weizmann Institute Dropbox/Serge Rosenblum/Quantum Circuits Lab",
+    "CS-TM-LT2": "C:/Users/barkayg/Weizmann Institute Dropbox/Barkay Guttel/Quantum Circuits Lab"
+  },
+  "paths": {
+    "paper_data": "Common/QuantumZeno/Paper/zeno_paper_data",
+    "paper_plots": "Common/QuantumZeno/Paper/Plots",
+    "first_transition_data": "Common/QuantumZeno/Paper/zeno_paper_data/qj_union_scan_exp_3_14_16",
+    "first_transition_lambda_table": "Common/QuantumZeno/Paper/zeno_paper_data/qj_union_scan_exp_3_14_16/hmm_lambda_per_file.csv",
+    "third_transition_data": "Common/QuantumZeno/Paper/zeno_paper_data/combined_results_0_and_1_merged",
+    "third_transition_lambda_table": "Common/QuantumZeno/Paper/zeno_paper_data/combined_results_0_and_1_merged/hmm_rates_per_drive.csv",
+    "third_transition_pole_data": "Common/QuantumZeno/Paper/zeno_paper_data/combined_results_0_and_1_merged/pole_analysis_data_for_main_text_figure",
+    "paper_fit_reference": "Common/QuantumZeno/Paper/zeno_paper_data/deprecated_first_submission_data/scan_experiment_results_10/fitting_results_20251202_162520",
+    "paper_click_record_scans": "Common/QuantumZeno/Paper/zeno_paper_data/click_record_repeated/Omega_BG0_scan",
+    "click_record_scans": "Experiments/Zeno/CavityRecAl6/Chip_TransSap46_5/OPX/two_transmons/click_record_repeated/Omega_BG0_scan"
+  }
+}

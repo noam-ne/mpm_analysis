@@ -286,7 +286,7 @@ def plot_discriminant_window_sweep(curves, *, title: str | None = None):
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
-    from mpm_analysis.plotting._style import apply_paper_style
+    from mpm_analysis.plotting._style import LABELS_FONT_SIZE, apply_paper_style
 
     apply_paper_style()
     ink, used, other, ep_col, band = "#222222", "#2a78d6", "#a7b0b8", "#d6402f", "#eef1f4"
@@ -352,7 +352,7 @@ def plot_discriminant_window_sweep(curves, *, title: str | None = None):
                 ep_txt += rf",  $\chi^2$/dof = {c['chi2']:.1f}/{c['dof']}"
         else:
             ep_txt = "no crossing in the fit window"
-        ax.set_title(f"{c['label']}\n{ep_txt}", color=ink, fontsize=10)
+        ax.set_title(f"{c['label']}\n{ep_txt}", color=ink, fontsize=LABELS_FONT_SIZE)
         if x_lo is not None:
             ax.set_xlim(x_lo, x_hi)
         if y_vals:

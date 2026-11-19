@@ -21,21 +21,49 @@ python examples/ex_run_bootstrap_small.py
 
 ---
 
-## Multi-machine path setup
+## Settings files: paths and plot style
 
-Dropbox paths differ per machine.  `run.py` auto-detects the correct root
-using the hostname.  The mapping lives in
-`src/mpm_analysis/utils/lab_paths.py` and mirrors `ZenoPlotting/base.py`.
+Two JSON files in `src/mpm_analysis/config/` hold the settings the whole
+package shares.  Each value is typed once, there, and used by name everywhere
+else.
 
+| file | holds | read through |
+|---|---|---|
+| `paths.json` | the Dropbox folder of every machine (`dropbox_roots`) and the named folders and files under it (`paths`) | `mpm_analysis.utils.lab_paths.get_named_path(name)` |
+| `plotting_params.json` | the plot style: DPI, font size, line and marker widths, column widths, colours | the constants of `mpm_analysis.plotting._style` (`DPI`, `LABELS_FONT_SIZE`, `LINE_WIDTH`, …) |
+
+```python
+from mpm_analysis.utils.lab_paths import get_named_path
+from mpm_analysis.plotting._style import DPI, LABELS_FONT_SIZE
+
+folder = get_named_path("first_transition_data")
+scan = get_named_path("click_record_scans") / "scan_experiment_results_22"
+```
+
+Rules:
+
+* A lab path is never typed in a script.  Add it to `paths` in `paths.json`
+  under a name and read it with `get_named_path`.  `run.py`'s PATHS block and
+  the other run files do this.
+* Plotting code never types a value that is in `plotting_params.json`.  It
+  imports the constant from `plotting/_style.py`, the only module that opens
+  the file.  To change the paper's font size or DPI, change the JSON.
+* Values that belong to one figure (ticks, axis limits, a module's own
+  palette) stay in that figure's code.
 
 **Adding a new computer:**
 
 1. Find your hostname: `python -c "import socket; print(socket.gethostname())"`
-2. Add an entry to `_DROPBOX_ROOTS` in `src/mpm_analysis/utils/lab_paths.py`.
-.
+2. Add a line to `dropbox_roots` in `src/mpm_analysis/config/paths.json` with
+   the path to your local `Quantum Circuits Lab` Dropbox folder.
 
 If your hostname is not registered you will get a clear `ValueError` when
 `run.py` starts — not a silent wrong-path failure.
+
+ZenoPlotting's paper-figure scripts (`zeno_plotting/mpm_transition_figures/`)
+read their paths and DPI from these two files as well, through the same two
+modules.  `tests/test_zenoplotting_interface.py` lists everything those
+scripts use from this package and fails when a change here would break them.
 
 ---
 
@@ -61,6 +89,7 @@ mpm_analysis/
 ├── docs/
 │   └── adding_a_new_json_format.md  ← How to plug in a new data source
 └── src/mpm_analysis/
+    ├── config/              ← paths.json (lab paths) + plotting_params.json (plot style)
     ├── data_types/          ← Typed containers (no I/O, no heavy deps)
     ├── io/                  ← Load/save: JSON, NPZ, experimental folders
     ├── analysis/            ← Numerical core: MPM, RRHA, bootstrap, ksi, guesses

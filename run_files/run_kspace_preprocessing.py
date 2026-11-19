@@ -25,7 +25,7 @@ matplotlib.use("Agg")               # headless-safe; we open saved files at the 
 
 from mpm_analysis.pipeline.compressed_click_pipeline import CompressedClickPipeline
 from mpm_analysis.pipeline.kspace_pipeline import _open_paths
-from mpm_analysis.utils.lab_paths import get_lab_path
+from mpm_analysis.utils.lab_paths import get_named_path
 
 # --- configuration ---------------------------------------------------------
 SCAN_NUMBERS = [28]
@@ -36,20 +36,12 @@ MAKE_FIGURES = True     # counting-statistics + per-λ summary + dead-time PNGs
 OPEN_FIGURES = True    # open the saved stat figures after the run
 OPEN_PER_LAMBDA = False # also pop open the one-per-λ dead-time histograms
 
-# INDIVIDUAL_RUNS = get_lab_path(
-#     "Experiments", "Zeno", "CavityRecAl6", "Chip_TransSap46_5", "OPX",
-#     "two_transmons", "click_record_repeated", "Omega_BG0_scan",
-#     f"scan_experiment_results_{SCAN_NUMBER}", "individual_runs",
-# )
 
 
 def main() -> None:
     for scan in SCAN_NUMBERS:
-        INDIVIDUAL_RUNS = get_lab_path(
-            "Experiments", "Zeno", "CavityRecAl6", "Chip_TransSap46_5", "OPX",
-            "two_transmons", "click_record_repeated", "Omega_BG0_scan",
-            f"scan_experiment_results_{scan}", "individual_runs",
-        )
+        INDIVIDUAL_RUNS = (get_named_path("click_record_scans")
+                           / f"scan_experiment_results_{scan}" / "individual_runs")
         
         out = CompressedClickPipeline().run(
             INDIVIDUAL_RUNS,

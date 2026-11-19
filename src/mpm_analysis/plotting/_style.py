@@ -3,18 +3,20 @@ _style.py
 ---------
 Shared plotting style constants and helpers.
 
-All plotting functions in this package should import their constants from here.
+The style values (DPI, font size, line and marker widths, column widths,
+colours) are stored in ``mpm_analysis/config/plotting_params.json`` and read
+here, once, into the constants below.  Change a value in the JSON, not here.
+
+All plotting functions in this package import their constants from this
+module; none of them types a value that is in the JSON.
 """
 from __future__ import annotations
 
-import numpy as np
+import decimal
 
-_HAS_ZENO_PLOTTING = False
-_PFS = None
-_TTFC = None
+from mpm_analysis.config import load_config
 
-def _mm_to_inch(mm: float) -> float:
-    return mm / 25.4
+_PARAMS = load_config("plotting_params")
 
 
 # ---------------------------------------------------------------------------
@@ -22,29 +24,18 @@ def _mm_to_inch(mm: float) -> float:
 # ---------------------------------------------------------------------------
 
 def mm_to_inch(mm: float) -> float:
-    return _mm_to_inch(mm)
+    return mm / 25.4
 
 
-if _HAS_ZENO_PLOTTING:
-    ONE_COLUMN_WIDTH = float(_PFS.ONE_COLUMN_FIGURE_WIDTH)
-    TWO_COLUMN_WIDTH = float(_PFS.TWO_COLUMNS_FIGURE_WIDTH)
-    DPI = int(_PFS.DPI)
-    LABELS_FONT_SIZE = int(_PFS.LABELS_FONT_SIZE)
-    MARKER_SIZE = float(_PFS.MARKER_SIZE)
-    LINE_WIDTH = float(_PFS.LINE_WIDTH)
-    AXES_ARROW_WIDTH = float(_PFS.AXES_ARROW_WIDTH)
-    LAMBDA_OBS_COLOR = str(_PFS.LAMBDA_OBS_COLOR)
-    SURVIVAL_PROBABILITY_LABEL = str(_PFS.SURVIVAL_PROBABILITY_LABEL)
-else:
-    ONE_COLUMN_WIDTH = mm_to_inch(88)   # 88 mm — Nature one-column
-    TWO_COLUMN_WIDTH = mm_to_inch(180)  # 180 mm — Nature two-column
-    DPI = 600
-    LABELS_FONT_SIZE = 10
-    MARKER_SIZE = 1.5
-    LINE_WIDTH = 1.5
-    AXES_ARROW_WIDTH = 0.03
-    LAMBDA_OBS_COLOR = "#d02500"
-    SURVIVAL_PROBABILITY_LABEL = r"$P_{|1\rangle}^{\mathrm{ens}}$"
+ONE_COLUMN_WIDTH = mm_to_inch(_PARAMS["one_column_width_mm"])   # 88 mm — Nature one-column
+TWO_COLUMN_WIDTH = mm_to_inch(_PARAMS["two_column_width_mm"])   # 180 mm — Nature two-column
+DPI = int(_PARAMS["dpi"])
+LABELS_FONT_SIZE = int(_PARAMS["labels_font_size"])
+MARKER_SIZE = float(_PARAMS["marker_size"])
+LINE_WIDTH = float(_PARAMS["line_width"])
+AXES_ARROW_WIDTH = float(_PARAMS["axes_arrow_width"])
+LAMBDA_OBS_COLOR = str(_PARAMS["lambda_obs_color"])
+SURVIVAL_PROBABILITY_LABEL = str(_PARAMS["survival_probability_label"])
 
 # Fit line style (shared across all panels)
 FIT_LINEWIDTH = LINE_WIDTH * 0.5
@@ -54,21 +45,29 @@ FIT_LINESTYLE = (0, (7, 2))  # long dash, short gap
 # Colors
 # ---------------------------------------------------------------------------
 
-if _HAS_ZENO_PLOTTING:
-    PURPLE_MAGENTA = str(_TTFC.PURPLE_MAGENTA)
-    TEAL           = str(_TTFC.TEAL)
-    MUSTARD        = str(_TTFC.MUSTARD)
-    AZURE_BLUE     = str(_TTFC.AZURE_BLUE)
-    LAVENDER_BLUE  = str(_TTFC.LAVENDER_BLUE)
-else:
-    PURPLE_MAGENTA = "#A13D97"
-    TEAL           = "#1ABC9C"
-    MUSTARD        = "#D4AC0D"
-    AZURE_BLUE     = "#3498DB"
-    LAVENDER_BLUE  = "#8787de"
+PURPLE_MAGENTA = str(_PARAMS["colors"]["purple_magenta"])
+TEAL           = str(_PARAMS["colors"]["teal"])
+MUSTARD        = str(_PARAMS["colors"]["mustard"])
+AZURE_BLUE     = str(_PARAMS["colors"]["azure_blue"])
+LAVENDER_BLUE  = str(_PARAMS["colors"]["lavender_blue"])
 
 # Default linecut colors (for panel A)
 LINECUT_COLORS = [PURPLE_MAGENTA, TEAL, MUSTARD]
+
+
+# ---------------------------------------------------------------------------
+# Quoted values
+# ---------------------------------------------------------------------------
+
+def round_half_up(value: float, decimals: int) -> float:
+    """``value`` rounded to ``decimals`` digits as a person quotes it.
+
+    Half up on the decimal digits (1.0845 → 1.085, 1.0855 → 1.09), not
+    Python's ``round()`` on the binary float (1.0845 → 1.084).  The critical
+    lines of the paper figures are drawn at this value.
+    """
+    return float(decimal.Decimal(f"{float(value):.10f}").quantize(
+        decimal.Decimal(1).scaleb(-decimals), rounding=decimal.ROUND_HALF_UP))
 
 # ---------------------------------------------------------------------------
 # Axis helpers

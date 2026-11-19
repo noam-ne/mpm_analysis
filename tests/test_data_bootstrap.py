@@ -846,26 +846,26 @@ def test_loader_file_glob_selects_one_source_run(tmp_path):
     assert len(both) == 2 and {r.source_file.split(".")[0] for r in both} == {src.stem, other.stem}
 
 
-def test_s_next_x2_on_a_half_record(tmp_path, monkeypatch):
+def test_p_0_t_on_a_half_record(tmp_path, monkeypatch):
     """A record of at most HALF_RECORD_SEGMENTS segments has no second half:
-    S_next_x2 = S_next there (scan 16); above it, the two halves."""
+    p_0_t = S_next there (scan 16); above it, the two halves."""
     from mpm_analysis.io.experimental import PostSelectedLoader, click_record_npz
     n_seg, n_axes, n_reps = 8, 2, 300
     _write_post_selected(tmp_path, n_seg=n_seg, n_axes=n_axes, n_reps=n_reps)
     loader = PostSelectedLoader(csv_path=False)
     (nxt,) = loader.load(tmp_path, observables=["S_next"])
-    (x2,) = loader.load(tmp_path, observables=["S_next_x2"])
+    (x2,) = loader.load(tmp_path, observables=["p_0_t"])
     assert n_seg <= click_record_npz.HALF_RECORD_SEGMENTS
     assert x2.n_points == nxt.n_points and np.array_equal(x2.signal, nxt.signal)
-    assert np.all(x2.metadata["bootstrap_stats"]["N_attempts_S_next_x2"][1:] == n_axes * n_reps)
+    assert np.all(x2.metadata["bootstrap_stats"]["N_attempts_p_0_t"][1:] == n_axes * n_reps)
     monkeypatch.setattr(click_record_npz, "HALF_RECORD_SEGMENTS", n_seg - 1)   # a full record
-    (x2,) = loader.load(tmp_path, observables=["S_next_x2"])
+    (x2,) = loader.load(tmp_path, observables=["p_0_t"])
     assert x2.n_points == n_seg + 1 - (1 + n_seg // 2)
-    assert np.all(x2.metadata["bootstrap_stats"]["N_attempts_S_next_x2"][1:] == 2 * n_axes * n_reps)
+    assert np.all(x2.metadata["bootstrap_stats"]["N_attempts_p_0_t"][1:] == 2 * n_axes * n_reps)
 
 
 def test_loader_s_next_from_the_histogram(tmp_path, monkeypatch):
-    """S_next / S_next_far / S_next_x2: computed from first_click_counts, the
+    """S_next / S_next_far / p_0_t: computed from first_click_counts, the
     undefined tail trimmed, binomial sigma, multinomial draw with independent
     points."""
     from mpm_analysis.io.experimental import PostSelectedLoader
@@ -876,7 +876,7 @@ def test_loader_s_next_from_the_histogram(tmp_path, monkeypatch):
     from mpm_analysis.io.experimental import click_record_npz
     monkeypatch.setattr(click_record_npz, "HALF_RECORD_SEGMENTS", 0)   # the two-halves definition
     for key, offsets in [("S_next", (1,)), ("S_next_far", (1 + n_seg // 2,)),
-                         ("S_next_x2", (1, 1 + n_seg // 2))]:
+                         ("p_0_t", (1, 1 + n_seg // 2))]:
         (rec,) = loader.load(tmp_path, observables=[key])
         n_def = n_seg + 1 - max(offsets)              # anchor + defined points
         assert rec.n_points == n_def and np.all(np.isfinite(rec.signal))

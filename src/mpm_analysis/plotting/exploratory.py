@@ -12,6 +12,8 @@ from __future__ import annotations
 import numpy as np
 import matplotlib.pyplot as plt
 
+from mpm_analysis.plotting._style import LABELS_FONT_SIZE, LINE_WIDTH
+
 def plot_raw_survival(
     records,
     *,
@@ -251,10 +253,10 @@ def plot_spectrum_panels(result, *, title=None, axes=None, figsize=(15, 6)):
     plot_eigenvalue_spectrum(result, ax=axes[1], mode="frequency")
     axes[1].set_title("Frequencies", fontsize=12)
     for ax in axes:
-        ax.tick_params(labelsize=10)
+        ax.tick_params(labelsize=LABELS_FONT_SIZE)
         ax.xaxis.label.set_size(12)
         ax.yaxis.label.set_size(12)
-        ax.legend(fontsize=10)
+        ax.legend(fontsize=LABELS_FONT_SIZE)
         ax.grid(True, alpha=0.3, linewidth=0.5)
     return fig, axes
 
@@ -493,7 +495,7 @@ def plot_time_traces_slider(
         fit_y = fits0[i] if fits0 is not None else []
         fit_lines[k], = axis.plot(
             fit_x, fit_y,
-            color=key_color[k], lw=1.5, linestyle="--", zorder=5,
+            color=key_color[k], lw=LINE_WIDTH, linestyle="--", zorder=5,
         )
         fit_lines[k].set_visible(draw_fit)
 
@@ -566,7 +568,7 @@ def plot_time_traces_slider(
         handles = [scatter_artists[k] for k in keys]
         legend_labels = [labels.get(k, k) for k in keys]
         if draw_fit:
-            handles.append(Line2D([], [], color="0.4", lw=1.5, linestyle="--"))
+            handles.append(Line2D([], [], color="0.4", lw=LINE_WIDTH, linestyle="--"))
             legend_labels.append(
                 f"LSQ fit (order {mpm_order})" if fixed_poles
                 else f"MPM fit (order {mpm_order})"
@@ -580,7 +582,7 @@ def plot_time_traces_slider(
                    for i, k in enumerate(keys) for *_, y in comps[i]):
                 handles.append(Line2D([], [], color="0.4", lw=1.6, ls="--"))
                 legend_labels.append("< 0")
-        ax_host.legend(handles, legend_labels, fontsize=10)
+        ax_host.legend(handles, legend_labels, fontsize=LABELS_FONT_SIZE)
 
     comps0 = _draw_components(0)
     _rescale_axes(t0, Y0, comps0)

@@ -11,6 +11,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from mpm_analysis.plotting._style import DPI
+
 
 def win_long_path(p: str | Path) -> str:
     """Return a path string with the ``\\\\?\\`` prefix on Windows.
@@ -45,7 +47,7 @@ def save_figure_pdf_svg(
     stem: str,
     output_dir: str | Path,
     *,
-    dpi: int = 600,
+    dpi: int = DPI,
     png: bool = False,
 ) -> tuple[Path, Path]:
     """Save a matplotlib figure as PDF and SVG (optionally also PNG).

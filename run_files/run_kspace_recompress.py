@@ -24,7 +24,7 @@ from mpm_analysis.plotting.compressed_click_stats import (
     save_compressed_click_figures,
 )
 from mpm_analysis.pipeline.kspace_pipeline import _open_paths
-from mpm_analysis.utils.lab_paths import get_lab_path
+from mpm_analysis.utils.lab_paths import get_named_path
 
 # --- configuration ---------------------------------------------------------
 SCAN_NUMBER = 22
@@ -34,11 +34,7 @@ TARGET_MIN_DARK = 2          # the stricter rule to build
 MAKE_FIGURES = True
 OPEN_FIGURES = False
 
-SCAN_FOLDER = get_lab_path(
-    "Experiments", "Zeno", "CavityRecAl6", "Chip_TransSap46_5", "OPX",
-    "two_transmons", "click_record_repeated", "Omega_BG0_scan",
-    f"scan_experiment_results_{SCAN_NUMBER}",
-)
+SCAN_FOLDER = get_named_path("click_record_scans") / f"scan_experiment_results_{SCAN_NUMBER}"
 
 INPUT_DIR = SCAN_FOLDER / "compressed_click_analysis"
 OUT_DIR = SCAN_FOLDER / f"compressed_click_analysis_mindark{TARGET_MIN_DARK}"

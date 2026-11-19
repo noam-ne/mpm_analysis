@@ -36,6 +36,7 @@ from mpm_analysis.plotting.ksi_plot import plot_discriminant_curve
 from mpm_analysis.io.analysis_json import augment_json_with_transitions
 from mpm_analysis.utils.windows_paths import win_long_path
 from mpm_analysis.plotting.exploratory import plot_spectrum_panels
+from mpm_analysis.plotting._style import DPI
 from mpm_analysis.io.file_naming import build_figure_filename
 
 
@@ -585,7 +586,7 @@ def run_figure(
     debug: bool = False,
     save_figures: bool = False,
     plots_dir: str | Path | None = None,
-    dpi: int = 600,
+    dpi: int = DPI,
     show_plots: bool = True,
 ):
     """Step 6 — paper transition figure from this run's result.

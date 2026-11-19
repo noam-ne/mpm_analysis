@@ -1,0 +1,19 @@
+{
+  "_about": "The plot style of every mpm_analysis figure. Read once by mpm_analysis.plotting._style, which exposes each value as a constant (DPI, LABELS_FONT_SIZE, LINE_WIDTH ...); plotting code imports the constants from there and types none of these values itself. Widths in mm, sizes and widths in points, colours as hex.",
+  "one_column_width_mm": 88,
+  "two_column_width_mm": 180,
+  "dpi": 600,
+  "labels_font_size": 10,
+  "marker_size": 1.5,
+  "line_width": 1.5,
+  "axes_arrow_width": 0.03,
+  "lambda_obs_color": "#d02500",
+  "survival_probability_label": "$P_{|1\\rangle}^{\\mathrm{ens}}$",
+  "colors": {
+    "purple_magenta": "#A13D97",
+    "teal": "#1ABC9C",
+    "mustard": "#D4AC0D",
+    "azure_blue": "#3498DB",
+    "lavender_blue": "#8787de"
+  }
+}

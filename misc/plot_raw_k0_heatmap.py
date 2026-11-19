@@ -12,15 +12,11 @@ import matplotlib.pyplot as plt
 
 
 from mpm_analysis.kspace import get_kspace_loader
-from mpm_analysis.utils.lab_paths import get_lab_path
+from mpm_analysis.utils.lab_paths import get_named_path
 
 SOURCE = "compressed"      # "json" (raw scan JSONs) | "compressed" (compressed NPZs)
 SCAN_NUMBER = 22
-SCAN_FOLDER = get_lab_path(
-    "Experiments", "Zeno", "CavityRecAl6", "Chip_TransSap46_5", "OPX",
-    "two_transmons", "click_record_repeated", "Omega_BG0_scan",
-    f"scan_experiment_results_{SCAN_NUMBER}",
-)
+SCAN_FOLDER = get_named_path("click_record_scans") / f"scan_experiment_results_{SCAN_NUMBER}"
 # Raw JSONs sit directly in the scan folder; the compressed NPZs live in the
 # sub-folder written by the compressed-click builder.
 FOLDER = SCAN_FOLDER if SOURCE == "json" else SCAN_FOLDER / "compressed_click_analysis"

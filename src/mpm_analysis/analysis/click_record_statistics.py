@@ -6,7 +6,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from mpm_analysis.utils.lab_paths import get_lab_path
+from mpm_analysis.utils.lab_paths import get_named_path
 
 from mpm_analysis.io.experimental import ParityLoader
 from mpm_analysis.io.experimental.click_record_npz import ClickRecordNpzLoader, ClickRecordData
@@ -23,9 +23,8 @@ from mpm_analysis.io.simulated import SimClickRecordLoader
 # ===========================================================================
 
 # ---- Data ----
-_ZT = r"Experiments\Zeno\CavityRecAl6\Chip_TransSap46_5\OPX\two_transmons"
-_PARITY = _ZT + r"\click_record_repeated\Omega_BG0_scan\scan_experiment_results_12"
-PARITY_FOLDER = get_lab_path(_PARITY)
+# paths by name: mpm_analysis/config/paths.json
+PARITY_FOLDER = get_named_path("click_record_scans") / "scan_experiment_results_12"
 
 # ===========================================================================
 # HELPERS

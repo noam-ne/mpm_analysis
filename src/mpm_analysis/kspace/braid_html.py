@@ -23,6 +23,7 @@ from pathlib import Path
 
 import numpy as np
 
+from mpm_analysis.plotting._style import LAMBDA_OBS_COLOR
 from mpm_analysis.plotting.braid_panels import (
     braid_diagram_geometry,
     class_color,
@@ -224,7 +225,7 @@ def export_braid_topology_html(
     for lm in gD.transition_lambdas:
         fig.add_trace(go.Scatter(
             x=[lm, lm], y=[0, 1], mode="lines",
-            line={"color": "#d02500", "width": 1.2, "dash": "dash"},
+            line={"color": LAMBDA_OBS_COLOR, "width": 1.2, "dash": "dash"},
             hovertemplate=f"EP near λ={lm:.3f}<extra></extra>",
             showlegend=False,
         ), row=2, col=2)

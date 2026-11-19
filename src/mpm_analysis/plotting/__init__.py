@@ -5,7 +5,11 @@ Plotting utilities for mpm_analysis.
 
 Sub-modules
 ~~~~~~~~~~~
-_style          — shared style constants and helpers (no ZenoPlotting dep)
+_style          — shared style constants and helpers.  The values (DPI, font
+                  size, line and marker widths, column widths, colours) are
+                  read from ``mpm_analysis/config/plotting_params.json``;
+                  every module here imports them from ``_style`` and types
+                  none of them itself
 exploratory     — quick sanity-check plots (raw data, grids, spectra)
                   includes ``plot_svd_singular_values`` for model-order
                   calibration via the Hankel SVD spectrum

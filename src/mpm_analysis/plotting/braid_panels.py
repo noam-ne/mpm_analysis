@@ -41,6 +41,9 @@ from itertools import combinations
 
 import numpy as np
 
+from mpm_analysis.plotting._style import (
+    AZURE_BLUE, LAMBDA_OBS_COLOR, LAVENDER_BLUE, MUSTARD, PURPLE_MAGENTA, TEAL,
+)
 from mpm_analysis.analysis.braid_topology import (
     DEFAULT_PROJ_MIX,
     BraidScan,
@@ -52,14 +55,14 @@ from mpm_analysis.analysis.braid_topology import (
 # closed loop of the link" holds everywhere.  Individual strands keep the
 # _POLE_COLORS_HEX used by every other k-space figure, so a strand can still be
 # traced back to the poles-vs-k plots.  Both are colourblind-distinguishable.
-COMPONENT_COLORS = ["#A13D97", "#1ABC9C", "#D4AC0D", "#3498DB", "#8787de", "#d02500"]
+COMPONENT_COLORS = [PURPLE_MAGENTA, TEAL, MUSTARD, AZURE_BLUE, LAVENDER_BLUE, LAMBDA_OBS_COLOR]
 
 #: Classes get stable colours across every figure in a run.
 _CLASS_COLORS = {
-    "Class I": "#3498DB",
-    "Class II": "#A13D97",
-    "Class III": "#1ABC9C",
-    "Class IV": "#D4AC0D",
+    "Class I": AZURE_BLUE,
+    "Class II": PURPLE_MAGENTA,
+    "Class III": TEAL,
+    "Class IV": MUSTARD,
     "Class V": "#BBBBBB",
 }
 #: Distinct muted shades for labels that match no paper class, so that two
@@ -285,7 +288,7 @@ def plot_braid_diagram_panel(
 
     if not topo.quality.trustworthy:
         ax.text(0.99, 0.03, "unreliable — see quality", transform=ax.transAxes,
-                ha="right", va="bottom", fontsize=fontsize, color="#d02500")
+                ha="right", va="bottom", fontsize=fontsize, color=LAMBDA_OBS_COLOR)
     return ax
 
 
@@ -543,7 +546,7 @@ def plot_class_strip_panel(
               handlelength=1.0, columnspacing=1.0)
 
     if ax_nu is not None:
-        ax_nu.plot(g.lambda_values, g.nu, "o-", color="#A13D97",
+        ax_nu.plot(g.lambda_values, g.nu, "o-", color=PURPLE_MAGENTA,
                    ms=2.5, lw=LINE_WIDTH)
         ax_nu.axhline(0, color="0.75", lw=0.6)
         ax_nu.set_xlim(g.edges[0], g.edges[-1])

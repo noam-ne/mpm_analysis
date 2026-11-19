@@ -73,6 +73,7 @@ from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers 3d projection)
 from scipy.optimize import linear_sum_assignment
 
 from mpm_analysis.kspace.data_types import KSpacePolesResult, KSpaceRecord
+from mpm_analysis.plotting._style import AZURE_BLUE, LAMBDA_OBS_COLOR, PURPLE_MAGENTA
 
 
 # ---------------------------------------------------------------------------
@@ -1760,11 +1761,11 @@ def export_pole_pair_topology_html(
             fig.add_trace(go.Scatter(
                 x=[0.0] * len(crossings), y=[0.0] * len(crossings),
                 mode="markers+text",
-                marker={"color": "#d02500", "size": 13, "symbol": "x-thin",
-                        "line": {"color": "#d02500", "width": 2.5}},
+                marker={"color": LAMBDA_OBS_COLOR, "size": 13, "symbol": "x-thin",
+                        "line": {"color": LAMBDA_OBS_COLOR, "width": 2.5}},
                 text=[f"  k={kc:.3f}" for kc, _ in crossings],
                 textposition="middle right",
-                textfont={"color": "#d02500", "size": 11},
+                textfont={"color": LAMBDA_OBS_COLOR, "size": 11},
                 customdata=[[kc, rmin] for kc, rmin in crossings],
                 hovertemplate=(
                     "origin crossing<br>k=%{customdata[0]:.4f} rad<br>"
@@ -1786,7 +1787,7 @@ def export_pole_pair_topology_html(
                 )
                 if crossings:
                     ks = ", ".join(f"{kc:.3f}" for kc, _ in crossings)
-                    summary += f"<br><span style='color:#d02500'>crossing k = {ks}</span>"
+                    summary += f"<br><span style='color:{LAMBDA_OBS_COLOR}'>crossing k = {ks}</span>"
             else:
                 summary = "no valid poles at this λ"
 
@@ -2382,9 +2383,9 @@ def export_raw_kspace_traces_html(
         k_disp = r.k_array[ki]
         sig = r.signal[ki, :]
         fig.add_trace(go.Scatter(x=r.t, y=sig.real, name="Re", visible=(i == 0),
-                                 line=dict(color="#3498DB")))
+                                 line=dict(color=AZURE_BLUE)))
         fig.add_trace(go.Scatter(x=r.t, y=sig.imag, name="Im", visible=(i == 0),
-                                 line=dict(color="#A13D97")))
+                                 line=dict(color=PURPLE_MAGENTA)))
     steps = []
     for i, r in enumerate(recs):
         vis = [False] * (2 * len(recs))
@@ -2542,7 +2543,7 @@ def plot_braiding_vs_lambda(
         )
 
     lam = braiding_exp["lambda_values"]
-    ax_nu.plot(lam, braiding_exp["nu_total"], "o-", color="#A13D97",
+    ax_nu.plot(lam, braiding_exp["nu_total"], "o-", color=PURPLE_MAGENTA,
                label=f"total ({primary_label})")
     if braiding_theory is not None:
         ax_nu.plot(braiding_theory["lambda_values"], braiding_theory["nu_total"],
@@ -2550,11 +2551,11 @@ def plot_braiding_vs_lambda(
     # mark ν transitions (exceptional points in λ)
     tr = braiding_transitions(braiding_exp)
     for lm in tr["lambda_mid"]:
-        ax_nu.axvline(lm, color="#d02500", lw=1.0, ls=(0, (3, 2)), alpha=0.8)
+        ax_nu.axvline(lm, color=LAMBDA_OBS_COLOR, lw=1.0, ls=(0, (3, 2)), alpha=0.8)
         if ax_pair is not None:
-            ax_pair.axvline(lm, color="#d02500", lw=1.0, ls=(0, (3, 2)), alpha=0.8)
+            ax_pair.axvline(lm, color=LAMBDA_OBS_COLOR, lw=1.0, ls=(0, (3, 2)), alpha=0.8)
         if ax_k is not None:
-            ax_k.axvline(lm, color="#d02500", lw=1.0, ls=(0, (3, 2)), alpha=0.8)
+            ax_k.axvline(lm, color=LAMBDA_OBS_COLOR, lw=1.0, ls=(0, (3, 2)), alpha=0.8)
     ax_nu.axhline(0, color="0.7", lw=0.6)
     ax_nu.set_ylabel(r"braid index  $\nu_{\mathrm{total}}$")
     ax_nu.set_title("Braiding vs λ  (red dashed = ν transition / exceptional point)")
@@ -2583,7 +2584,7 @@ def plot_braiding_vs_lambda(
 
     if ax_k is not None:
         ax_k.plot(lam, braiding_exp.get("ep_k", np.full_like(lam, np.nan)), "o-",
-                  color="#A13D97", label=primary_label)
+                  color=PURPLE_MAGENTA, label=primary_label)
         if braiding_theory is not None and "ep_k" in braiding_theory:
             ax_k.plot(braiding_theory["lambda_values"], braiding_theory["ep_k"],
                       "s--", color="0.4", label="theory")

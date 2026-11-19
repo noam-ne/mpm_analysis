@@ -43,7 +43,7 @@ from mpm_analysis.analysis.click_correlations import (
 from mpm_analysis.io.experimental.compressed_click_record import _unique_path
 from mpm_analysis.io.file_naming import build_figure_filename
 from mpm_analysis.plotting._style import (
-    AZURE_BLUE, LINE_WIDTH, MARKER_SIZE, PURPLE_MAGENTA, TEAL,
+    AZURE_BLUE, LINE_WIDTH, MARKER_SIZE, MUSTARD, PURPLE_MAGENTA, TEAL,
     TWO_COLUMN_WIDTH, apply_paper_style, make_ax_lines_wider,
 )
 from mpm_analysis.utils.windows_paths import win_long_path
@@ -85,7 +85,7 @@ CHANNEL_INFO = {
 #: Every mode measures absolute time from each run's own t = 0.
 _XLABEL = r"$t$ ($\mu$s)"
 
-_POLE_COLORS = [AZURE_BLUE, PURPLE_MAGENTA, TEAL, "#D4AC0D", "#555555"]
+_POLE_COLORS = [AZURE_BLUE, PURPLE_MAGENTA, TEAL, MUSTARD, "#555555"]
 
 
 def _suptitle(results: list[ClickCorrelationResult], what: str) -> str:

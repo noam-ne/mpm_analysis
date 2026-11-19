@@ -37,6 +37,7 @@ def make_third_transition_figure(
     ylim_decay_b: tuple[float, float] | None = None,
     discriminant_fit: dict | None = None,
     crit_line_x: float | None = None,
+    crit_line_decimals: int | None = None,
 ) -> "plt.Figure":
     """Build the two-panel main-text figure.
 
@@ -93,6 +94,11 @@ def make_third_transition_figure(
         Draw the transition line and its label at this λ (the value the text
         quotes, e.g. 1.09) instead of the fit's own value; the dashed curve
         is unchanged.
+    crit_line_decimals:
+        Draw the transition line and its label at the fit's own value rounded
+        to this many decimals, as quoted (2: 1.0855 → 1.09) — the appendix
+        figure's ``crit_line_decimals``; the dashed curve is unchanged.
+        ``None`` → unrounded.  Not together with ``crit_line_x``.
 
     Returns
     -------
@@ -103,13 +109,26 @@ def make_third_transition_figure(
 
     from mpm_analysis.plotting._style import (
         ONE_COLUMN_WIDTH, LINECUT_COLORS, LABELS_FONT_SIZE, LINE_WIDTH,
-        LAMBDA_OBS_COLOR, mm_to_inch, apply_paper_style,
+        LAMBDA_OBS_COLOR, mm_to_inch, apply_paper_style, round_half_up,
     )
     from mpm_analysis.plotting.survival_curves import plot_survival_curves_panel
     from mpm_analysis.plotting.pole_spectrum import plot_decay_and_freq_panel
 
     if target_lambdas is None:
         target_lambdas = np.array([0.4, 1.1, 1.5])
+
+    # The fit's own transition value: λ_EP of the step-3 line, else λ_c of the sqrt fit.
+    if discriminant_fit is not None:
+        lam_fit = discriminant_fit["lambda_ep"]
+        lam_fit = float(lam_fit) if lam_fit is not None and np.isfinite(lam_fit) else None
+    else:
+        sqrt_fit = panel_b_result.critical_point_sqrt_fit
+        lam_fit = sqrt_fit.lambda_c if sqrt_fit is not None else None
+    if crit_line_decimals is not None:
+        if crit_line_x is not None:
+            raise ValueError("Pass crit_line_x or crit_line_decimals, not both.")
+        if lam_fit is not None:
+            crit_line_x = round_half_up(lam_fit, crit_line_decimals)
 
     apply_paper_style()
 
@@ -155,14 +174,7 @@ def make_third_transition_figure(
     )
 
     # ---- "→ Quantum Zeno" beside the transition line ----
-    if discriminant_fit is not None:
-        lam_t = discriminant_fit["lambda_ep"]
-        lam_t = float(lam_t) if lam_t is not None and np.isfinite(lam_t) else None
-    else:
-        sqrt_fit = panel_b_result.critical_point_sqrt_fit
-        lam_t = sqrt_fit.lambda_c if sqrt_fit is not None else None
-    if crit_line_x is not None:
-        lam_t = float(crit_line_x)
+    lam_t = float(crit_line_x) if crit_line_x is not None else lam_fit
     if transition_label and lam_t is not None:
         _add_transition_label(
             ax_b, lam_t, transition_label,

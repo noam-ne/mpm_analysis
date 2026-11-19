@@ -78,7 +78,7 @@ def _load_json(path: Path, *, retries: int = 5, delay: float = 3.0) -> dict:
 # coordinates (X/Y/Z) and the raw shot counts are measurements at t=0 and are
 # never touched by ``init_error``.
 _INIT_ERROR_STAT_FIELDS = ("survival", "SX", "SZ", "S_pooled", "S_pooled_strict",
-                           "S_next", "S_next_far", "S_next_x2")
+                           "S_next", "S_next_far", "p_0_t")
 
 
 def _defined_length(extractors: dict, jd: dict, t: np.ndarray,

@@ -47,13 +47,11 @@ Programmatic preprocessing:
 
 ```python
 from mpm_analysis.pipeline.compressed_click_pipeline import CompressedClickPipeline
-from mpm_analysis.utils.lab_paths import get_lab_path
+from mpm_analysis.utils.lab_paths import get_named_path
 
-individual_runs = get_lab_path(
-    "Experiments", "Zeno", "CavityRecAl6", "Chip_TransSap46_5", "OPX",
-    "two_transmons", "click_record_repeated", "Omega_BG0_scan",
-    "scan_experiment_results_17", "individual_runs",
-)
+# "click_record_scans" is a named path of mpm_analysis/config/paths.json
+individual_runs = (get_named_path("click_record_scans")
+                   / "scan_experiment_results_17" / "individual_runs")
 
 out = CompressedClickPipeline().run(
     individual_runs,

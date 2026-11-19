@@ -409,9 +409,8 @@ def plot_appendix_bootstrap(
     # half up on the decimal digits, as a person quotes it (1.0845 → 1.085),
     # not Python's round() on the binary float (→ 1.084).
     if lc is not None and crit_line_decimals is not None:
-        from decimal import Decimal, ROUND_HALF_UP
-        lc_line = float(Decimal(f"{float(lc):.10f}").quantize(
-            Decimal(1).scaleb(-crit_line_decimals), rounding=ROUND_HALF_UP))
+        from mpm_analysis.plotting._style import round_half_up
+        lc_line = round_half_up(lc, crit_line_decimals)
     else:
         lc_line = lc
 
